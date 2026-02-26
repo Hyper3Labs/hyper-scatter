@@ -217,26 +217,69 @@ async function installFpsProbe(page: Page): Promise<void> {
 }
 
 async function setDemoControls(page: Page, cfg: Config): Promise<void> {
-  // Select renderer/geometry/points.
-  await page.select('#renderer', 'webgl');
-  await page.select('#geometry', cfg.geometry);
-  await page.select('#numPoints', String(cfg.points));
+  // The demo page (index.html / app.ts) uses:
+  //   - Radio buttons:  input[name="geometry"]  (values: 'euclidean' | 'poincare')
+  //   - Radio buttons:  input[name="renderer"]  (values: 'webgl' | 'reference')
+  //   - Range slider:   input#numPoints         (0–10, mapped to POINT_PRESETS)
+  // There is no explicit "Generate" button; the app auto-generates on input changes.
 
-  // Click generate.
-  await page.click('#generateBtn');
+  // POINT_PRESETS from app.ts — kept in sync so we can map a point count to a slider index.
+  const POINT_PRESETS = [
+    1_000, 10_000, 50_000, 100_000, 250_000, 500_000,
+    1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000,
+  ];
 
-  // Wait for statPoints to update to the selected N.
-  const expected = cfg.points.toLocaleString();
+  // Snap to the nearest preset.
+  const sliderIndex = POINT_PRESETS.reduce(
+    (best, v, i) =>
+      Math.abs(v - cfg.points) < Math.abs(POINT_PRESETS[best] - cfg.points) ? i : best,
+    0,
+  );
+  const actualPoints = POINT_PRESETS[sliderIndex];
+
+  // Select geometry via its radio button.
+  await page.evaluate((geometry: string) => {
+    const el = document.querySelector<HTMLInputElement>(
+      `input[name="geometry"][value="${geometry}"]`,
+    );
+    if (el) {
+      el.checked = true;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }, cfg.geometry);
+
+  // Select the WebGL renderer via its radio button.
+  await page.evaluate(() => {
+    const el = document.querySelector<HTMLInputElement>('input[name="renderer"][value="webgl"]');
+    if (el) {
+      el.checked = true;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+
+  // Set the point-count slider and fire both 'input' and 'change' so the app
+  // debounce timer is triggered and the label is updated.
+  await page.evaluate((idx: number) => {
+    const el = document.getElementById('numPoints') as HTMLInputElement | null;
+    if (el) {
+      el.value = String(idx);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }, sliderIndex);
+
+  // Wait for statPoints to reflect the newly generated dataset.
+  const expected = actualPoints.toLocaleString();
   await page.waitForFunction(
     (exp: string) => {
       const el = document.getElementById('statPoints');
-      return !!el && (el.textContent || '').includes(exp);
+      return !!el && (el.textContent ?? '').includes(exp);
     },
     { timeout: 120000 },
-    expected
+    expected,
   );
 
-  // Give the app a beat to finish uploading buffers.
+  // Give the app a beat to finish uploading GPU buffers.
   await sleep(250);
 }
 
