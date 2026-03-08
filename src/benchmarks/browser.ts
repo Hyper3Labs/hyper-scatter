@@ -49,7 +49,13 @@
  * ============================================================================
  */
 
-import { GeometryMode, Renderer } from '../core/types.js';
+import { GeometryMode, Renderer, SelectionResult } from '../core/types.js';
+import {
+  Dataset3D,
+  GeometryMode3D,
+  Renderer3D,
+  SelectionResult3D,
+} from '../core/types3d.js';
 import { generateDataset } from '../core/dataset.js';
 import { EuclideanReference } from '../impl_reference/euclidean_reference.js';
 import { HyperbolicReference } from '../impl_reference/hyperbolic_reference.js';
@@ -57,6 +63,10 @@ import {
   EuclideanWebGLCandidate,
   HyperbolicWebGLCandidate,
 } from '../impl_candidate/webgl_candidate.js';
+import {
+  Euclidean3DWebGLCandidate,
+  Spherical3DWebGLCandidate,
+} from '../impl_candidate/webgl_candidate_3d.js';
 import {
   TimingStats,
   calculateStats,
@@ -75,7 +85,7 @@ import {
 
 export interface BenchmarkConfig {
   pointCounts: number[];
-  geometries: GeometryMode[];
+  geometries: BenchmarkGeometry[];
   warmupFrames: number;
   measuredFrames: number;
   hitTestSamples: number;
@@ -97,7 +107,7 @@ export interface BenchmarkConfig {
 }
 
 export interface BenchmarkResult {
-  geometry: GeometryMode;
+  geometry: BenchmarkGeometry;
   points: number;
   datasetGenMs: number;
   renderMs: TimingStats;
@@ -133,6 +143,7 @@ export interface BenchmarkReport {
 }
 
 export type ProgressCallback = (message: string, progress: number) => void;
+export type BenchmarkGeometry = GeometryMode | GeometryMode3D;
 
 // ============================================================================
 // Default Configuration
@@ -157,6 +168,52 @@ export const STRESS_CONFIG: BenchmarkConfig = {
   hitTestSamples: 100,
   renderer: 'webgl',
 };
+
+function is2DGeometry(geometry: BenchmarkGeometry): geometry is GeometryMode {
+  return geometry === 'euclidean' || geometry === 'poincare';
+}
+
+function is3DGeometry(geometry: BenchmarkGeometry): geometry is GeometryMode3D {
+  return geometry === 'euclidean3d' || geometry === 'sphere';
+}
+
+function createRng(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(1664525, state) + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
+function generateDataset3DForBenchmark(geometry: GeometryMode3D, n: number): Dataset3D {
+  const positions = new Float32Array(n * 3);
+  const labels = new Uint16Array(n);
+  const rand = createRng(42 + n + (geometry === 'sphere' ? 1337 : 0));
+
+  for (let i = 0; i < n; i++) {
+    labels[i] = i % 10;
+
+    if (geometry === 'sphere') {
+      const u = rand() * 2 - 1;
+      const theta = rand() * Math.PI * 2;
+      const s = Math.sqrt(Math.max(0, 1 - u * u));
+      positions[i * 3] = s * Math.cos(theta);
+      positions[i * 3 + 1] = u;
+      positions[i * 3 + 2] = s * Math.sin(theta);
+    } else {
+      positions[i * 3] = (rand() * 2 - 1) * 1.5;
+      positions[i * 3 + 1] = (rand() * 2 - 1) * 1.5;
+      positions[i * 3 + 2] = (rand() * 2 - 1) * 1.5;
+    }
+  }
+
+  return {
+    n,
+    positions,
+    labels,
+    geometry,
+  };
+}
 
 function getRendererMode(config: BenchmarkConfig): 'webgl' | 'reference' {
   return config.renderer ?? 'webgl';
@@ -227,7 +284,7 @@ function setBenchmarkCanvasVisibility(
  */
 async function runSingleBenchmark(
   canvas: HTMLCanvasElement,
-  geometry: GeometryMode,
+  geometry: BenchmarkGeometry,
   pointCount: number,
   config: BenchmarkConfig,
   onProgress?: ProgressCallback
@@ -246,27 +303,50 @@ async function runSingleBenchmark(
 
   onProgress?.(`Generating ${pointCount.toLocaleString()} ${geometry} points...`, 0);
 
-  // Generate dataset
-  const datasetStart = performance.now();
-  const dataset = generateDataset({
-    seed: 42,
-    n: pointCount,
-    labelCount: 10,
-    geometry,
-  });
-  const datasetGenMs = performance.now() - datasetStart;
+  let renderer: Renderer | Renderer3D;
+  let datasetGenMs: number;
 
-  // Create renderer
-  const renderer: Renderer = rendererMode === 'reference'
-    ? (geometry === 'euclidean' ? new EuclideanReference() : new HyperbolicReference())
-    : (geometry === 'euclidean' ? new EuclideanWebGLCandidate() : new HyperbolicWebGLCandidate());
+  if (is2DGeometry(geometry)) {
+    const datasetStart = performance.now();
+    const dataset = generateDataset({
+      seed: 42,
+      n: pointCount,
+      labelCount: 10,
+      geometry,
+    });
+    datasetGenMs = performance.now() - datasetStart;
 
-  renderer.init(renderCanvas, {
-    width,
-    height,
-    devicePixelRatio: window.devicePixelRatio,
-  });
-  renderer.setDataset(dataset);
+    renderer = rendererMode === 'reference'
+      ? (geometry === 'euclidean' ? new EuclideanReference() : new HyperbolicReference())
+      : (geometry === 'euclidean' ? new EuclideanWebGLCandidate() : new HyperbolicWebGLCandidate());
+
+    renderer.init(renderCanvas, {
+      width,
+      height,
+      devicePixelRatio: window.devicePixelRatio,
+    });
+    renderer.setDataset(dataset);
+  } else {
+    if (rendererMode === 'reference') {
+      throw new Error(`Geometry ${geometry} requires renderer='webgl' (reference mode is 2D-only).`);
+    }
+
+    const datasetStart = performance.now();
+    const dataset = generateDataset3DForBenchmark(geometry, pointCount);
+    datasetGenMs = performance.now() - datasetStart;
+
+    renderer = geometry === 'sphere'
+      ? new Spherical3DWebGLCandidate()
+      : new Euclidean3DWebGLCandidate();
+
+    renderer.init(renderCanvas, {
+      width,
+      height,
+      devicePixelRatio: window.devicePixelRatio,
+      pointRadius: 3,
+    });
+    renderer.setDataset(dataset);
+  }
 
   onProgress?.(`Warming up render...`, 0.1);
 
@@ -436,7 +516,9 @@ async function runSingleBenchmark(
   const lassoPolygon = generateTestPolygon(width / 2, height / 2, lassoRadius);
   const lassoStart = performance.now();
   const lassoResult = renderer.lassoSelect(lassoPolygon);
-  const lassoSelectedCount = await renderer.countSelection(lassoResult, { yieldEveryMs: 0 });
+  const lassoSelectedCount = is3DGeometry(geometry)
+    ? await (renderer as Renderer3D).countSelection(lassoResult as SelectionResult3D, { yieldEveryMs: 0 })
+    : await (renderer as Renderer).countSelection(lassoResult as SelectionResult, { yieldEveryMs: 0 });
   const lassoMs = performance.now() - lassoStart;
 
   // Memory usage (Chrome only)
@@ -494,6 +576,15 @@ export async function runBenchmarks(
   const rendererMode = getRendererMode(config);
   const candidateCanvas = getOrCreateCandidateCanvas(canvas);
   setBenchmarkCanvasVisibility(canvas, candidateCanvas, rendererMode);
+
+  if (rendererMode === 'reference') {
+    const unsupported = config.geometries.filter(is3DGeometry);
+    if (unsupported.length > 0) {
+      throw new Error(
+        `Reference mode only supports 2D geometries (euclidean, poincare). Unsupported: ${unsupported.join(', ')}`
+      );
+    }
+  }
 
   for (const geometry of config.geometries) {
     for (const pointCount of config.pointCounts) {

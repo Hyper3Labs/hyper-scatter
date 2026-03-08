@@ -114,9 +114,11 @@ footer a{font-size:.7rem}
           </div>
           <div class="control-group">
             <label>Geometries</label>
-            <select id="geometriesSelect" multiple size="2">
+            <select id="geometriesSelect" multiple size="4">
               <option value="euclidean" selected>Euclidean</option>
               <option value="poincare" selected>Poincaré</option>
+              <option value="euclidean3d">Euclidean 3D</option>
+              <option value="sphere">Sphere</option>
             </select>
           </div>
           <div class="control-group">
@@ -220,6 +222,11 @@ footer a{font-size:.7rem}
       const config = getConfig();
       if (config.pointCounts.length === 0 || config.geometries.length === 0) {
         alert('Select at least one point count and geometry');
+        return;
+      }
+
+      if (config.renderer === 'reference' && config.geometries.some((g) => g === 'euclidean3d' || g === 'sphere')) {
+        alert('Reference renderer supports only euclidean and poincare. Use WebGL for 3D geometries.');
         return;
       }
 

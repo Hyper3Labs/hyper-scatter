@@ -18,8 +18,8 @@
 
 A specialized scatterplot engine for [HyperView](https://github.com/HackerRoomAI/HyperView).
 
-- Geometries: **Poincaré (hyperbolic)** + **Euclidean** today; **Spherical (S²)** is a good future contribution.
-- Correctness: a slow CPU **Reference** defines semantics; the fast GPU **Candidate** must match.
+- Geometries: **Poincaré (hyperbolic)** + **Euclidean** in 2D, plus WebGL candidates for **Euclidean 3D** and **Sphere**.
+- Correctness: a slow CPU **Reference** defines 2D semantics; the fast GPU **Candidate** must match.
 - Implementation: **pure WebGL2** (no `regl`, no `three.js`, no runtime deps).
 
 ---
@@ -40,51 +40,25 @@ For the full invariants + how the harness selects candidate code paths, see [AGE
 ## Usage (copy/paste agent prompt)
 
 ```text
-You are a coding agent working in my repository.
-
-Use these imports:
-
-   import {
-      EuclideanWebGLCandidate,
-      HyperbolicWebGLCandidate,
-      createDataset,
-      createInteractionController,
-      type SelectionResult,
-   } from 'hyper-scatter';
-
-Goal:
-- Integrate `hyper-scatter` to render my embedding scatterplot.
-
-Requirements:
-1) Install:
-   - npm: `npm install hyper-scatter`
-
-2) Implement a small integration wrapper:
-    - Create `mountHyperScatter(canvas, params)` (or an idiomatic React hook).
-    - Pick renderer:
-       - if params.geometry === 'poincare' use `new HyperbolicWebGLCandidate()`
-       - else use `new EuclideanWebGLCandidate()`
-    - Ensure the canvas has a real CSS size (non-zero width/height).
-    - Init using CSS pixels:
-       - `const rect = canvas.getBoundingClientRect()`
-       - `renderer.init(canvas, { width: Math.max(1, Math.floor(rect.width)), height: Math.max(1, Math.floor(rect.height)), devicePixelRatio: window.devicePixelRatio })`
-    - Dataset:
-       - `renderer.setDataset(createDataset(params.geometry, params.positions, params.labels))`
-    - First frame:
-       - `renderer.render()`
-
-3) Wire interactions:
-   - Use `createInteractionController(canvas, renderer, { onHover, onLassoComplete })`.
-   - On lasso completion, keep the returned `SelectionResult` and (optionally) call:
-     - `await renderer.countSelection(result, { yieldEveryMs: 0 })` if you need an exact count without UI yielding.
-
-4) Cleanup:
-   - On unmount/destroy: `controller.destroy(); renderer.destroy();`
-
-Deliverables:
-- The concrete code changes + file paths.
-- A minimal example showing how to pass `Float32Array positions` (flat [x,y,x,y,...]) and optional `Uint16Array labels`.
+You are a coding agent; integrate `hyper-scatter` in my repo: install `npm install hyper-scatter`; create `mountHyperScatter(canvas, params)` (or React hook) using `EuclideanWebGLCandidate`, `HyperbolicWebGLCandidate`, `Euclidean3DWebGLCandidate`, `Spherical3DWebGLCandidate`, `createDataset`, `createDataset3D`, and `createInteractionController`; choose renderer by `params.geometry` (`euclidean`, `poincare`, `euclidean3d`, `sphere`); ensure non-zero CSS size, then `const rect = canvas.getBoundingClientRect()` and `renderer.init(canvas, { width: Math.max(1, Math.floor(rect.width)), height: Math.max(1, Math.floor(rect.height)), devicePixelRatio: window.devicePixelRatio })`; set dataset with `createDataset` for 2D or `createDataset3D` for 3D, then `renderer.render()`; wire `createInteractionController(canvas, renderer, { onHover, onLassoComplete })` only for 2D and optionally call `await renderer.countSelection(result, { yieldEveryMs: 0 })` for exact lasso counts; cleanup with `controller?.destroy(); renderer.destroy();`; return concrete code changes + file paths + a minimal example passing `Float32Array` positions (`[x,y,...]` or `[x,y,z,...]`) and optional `Uint16Array` labels.
 ```
+
+## API Highlights
+
+Runtime updates (no renderer re-creation): `setPalette`, `setCategoryVisibility`, `setCategoryAlpha`, `setInteractionStyle`.
+
+| Dimension | Geometry token | Geometry | Candidate class | Dataset helper |
+|---|---|---|---|---|
+| 2D | `euclidean` | Euclidean | `EuclideanWebGLCandidate` | `createDataset` |
+| 2D | `poincare` | Poincare (hyperbolic disk) | `HyperbolicWebGLCandidate` | `createDataset` |
+| 3D | `euclidean3d` | Euclidean 3D | `Euclidean3DWebGLCandidate` | `createDataset3D` |
+| 3D | `sphere` | Hypersphere (unit sphere) | `Spherical3DWebGLCandidate` | `createDataset3D` |
+
+Notes:
+- Hidden categories are excluded from `render`, `hitTest`, and `lassoSelect`.
+- `createInteractionController()` targets the 2D `Renderer` interface.
+- 2D `SelectionResult` supports `kind: 'indices' | 'geometry'`; `SelectionResult3D` is index-based.
+- 3D helper exports include `packPositionsXYZ`.
 
 ## Benchmarks
 
@@ -104,6 +78,11 @@ npm run bench -- --points=20000000
 ```
 
 Default sweep (smaller point counts): `npm run bench`
+
+Additional benchmark options:
+
+- `npm run bench -- --geometries=euclidean,poincare,euclidean3d,sphere` runs the WebGL candidate benchmark across 2D and 3D geometries.
+- `npm run bench -- --renderer=reference` and `npm run bench:accuracy` remain 2D-only.
 
 Note: for performance numbers, run headed (default). Headless runs can skew GPU timing.
 
@@ -145,7 +124,8 @@ The harness tries to reduce these paths (example: lasso timing is end-to-end and
 
 - [x] Euclidean Geometry
 - [x] Poincaré Disk (Hyperbolic) Geometry
-- [ ] **Spherical Geometry (S²)**: The architecture supports it (`GeometryMode` enum), but the Reference math is missing. Contributions welcome.
+- [x] 3D WebGL candidates (`euclidean3d`, `sphere`)
+- [ ] 3D reference renderer + accuracy harness
 
 ## License
 

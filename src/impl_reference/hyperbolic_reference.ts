@@ -20,6 +20,8 @@ import {
   Modifiers,
   HitResult,
   SelectionResult,
+  CategoryVisibilityMask,
+  InteractionStyle,
   CountSelectionOptions,
   DEFAULT_COLORS,
   SELECTION_COLOR,
@@ -34,7 +36,7 @@ import {
   zoomPoincare,
   mobiusTransform,
 } from '../core/math/poincare.js';
-import { lassoSelectBruteForce } from '../core/selection/point_in_polygon.js';
+import { pointInPolygon } from '../core/selection/point_in_polygon.js';
 
 export class HyperbolicReference implements Renderer {
   private canvas!: HTMLCanvasElement;
@@ -56,6 +58,26 @@ export class HyperbolicReference implements Renderer {
   private poincareGridColor = '#2a2a2a';
   private poincareDiskBorderWidthPx = 2;
   private poincareGridWidthPx = 0.5;
+  private categoryVisibilityMask = new Uint8Array(0);
+  private hasCategoryVisibilityMask = false;
+  private categoryAlpha = 1;
+  private interactionStyle: Required<InteractionStyle> = {
+    selectionColor: SELECTION_COLOR,
+    hoverColor: HOVER_COLOR,
+    hoverFillColor: null,
+  };
+
+  private isCategoryVisible(category: number): boolean {
+    if (!this.hasCategoryVisibilityMask) return true;
+    if (category < 0 || category >= this.categoryVisibilityMask.length) return true;
+    return this.categoryVisibilityMask[category] !== 0;
+  }
+
+  private isPointVisibleByCategory(index: number): boolean {
+    const ds = this.dataset;
+    if (!ds || index < 0 || index >= ds.n) return false;
+    return this.isCategoryVisible(ds.labels[index]);
+  }
 
   init(canvas: HTMLCanvasElement, opts: InitOptions): void {
     this.canvas = canvas;
@@ -120,11 +142,54 @@ export class HyperbolicReference implements Renderer {
     this.selection = new Set(indices);
   }
 
+  setPalette(colors: string[]): void {
+    this.colors = colors;
+  }
+
+  setCategoryVisibility(mask: CategoryVisibilityMask | null): void {
+    if (mask == null) {
+      this.categoryVisibilityMask = new Uint8Array(0);
+      this.hasCategoryVisibilityMask = false;
+    } else {
+      const n = mask.length >>> 0;
+      const next = new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        next[i] = mask[i] ? 1 : 0;
+      }
+      this.categoryVisibilityMask = next;
+      this.hasCategoryVisibilityMask = true;
+    }
+
+    if (this.hoveredIndex >= 0 && !this.isPointVisibleByCategory(this.hoveredIndex)) {
+      this.hoveredIndex = -1;
+    }
+  }
+
+  setCategoryAlpha(alpha: number): void {
+    this.categoryAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
+  }
+
+  setInteractionStyle(style: InteractionStyle): void {
+    if (typeof style.selectionColor === 'string' && style.selectionColor.length > 0) {
+      this.interactionStyle.selectionColor = style.selectionColor;
+    }
+    if (typeof style.hoverColor === 'string' && style.hoverColor.length > 0) {
+      this.interactionStyle.hoverColor = style.hoverColor;
+    }
+    if (Object.prototype.hasOwnProperty.call(style, 'hoverFillColor')) {
+      this.interactionStyle.hoverFillColor = style.hoverFillColor ?? null;
+    }
+  }
+
   getSelection(): Set<number> {
     return new Set(this.selection);
   }
 
   setHovered(index: number): void {
+    if (index >= 0 && !this.isPointVisibleByCategory(index)) {
+      this.hoveredIndex = -1;
+      return;
+    }
     this.hoveredIndex = index;
   }
 
@@ -161,9 +226,11 @@ export class HyperbolicReference implements Renderer {
     const { positions, labels, n } = dataset;
     const radius = this.pointRadius;
 
-    // First pass: unselected points
+    // First pass: all non-hovered points
+    ctx.globalAlpha = this.categoryAlpha;
     for (let i = 0; i < n; i++) {
-      if (this.selection.has(i) || i === this.hoveredIndex) continue;
+      if (i === this.hoveredIndex) continue;
+      if (!this.isCategoryVisible(labels[i])) continue;
 
       const dataX = positions[i * 2];
       const dataY = positions[i * 2 + 1];
@@ -179,11 +246,14 @@ export class HyperbolicReference implements Renderer {
       ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.globalAlpha = 1;
 
     // Second pass: selected points
-    ctx.fillStyle = SELECTION_COLOR;
+    ctx.strokeStyle = this.interactionStyle.selectionColor;
+    ctx.lineWidth = 2;
     for (const i of this.selection) {
       if (i === this.hoveredIndex) continue;
+      if (!this.isPointVisibleByCategory(i)) continue;
 
       const dataX = positions[i * 2];
       const dataY = positions[i * 2 + 1];
@@ -191,28 +261,39 @@ export class HyperbolicReference implements Renderer {
 
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, radius + 1, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.stroke();
     }
 
     // Third pass: hovered point
-    if (this.hoveredIndex >= 0 && this.hoveredIndex < n) {
+    if (this.hoveredIndex >= 0 && this.hoveredIndex < n && this.isPointVisibleByCategory(this.hoveredIndex)) {
       const i = this.hoveredIndex;
       const dataX = positions[i * 2];
       const dataY = positions[i * 2 + 1];
       const screen = projectPoincare(dataX, dataY, view, width, height);
 
-      ctx.strokeStyle = HOVER_COLOR;
+      ctx.strokeStyle = this.interactionStyle.hoverColor;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, radius + 3, 0, Math.PI * 2);
       ctx.stroke();
 
-      ctx.fillStyle = this.selection.has(i)
-        ? SELECTION_COLOR
-        : this.colors[labels[i] % this.colors.length];
-      ctx.beginPath();
-      ctx.arc(screen.x, screen.y, radius + 1, 0, Math.PI * 2);
-      ctx.fill();
+      if (this.selection.has(i)) {
+        ctx.strokeStyle = this.interactionStyle.selectionColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, radius + 1, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = this.colors[labels[i] % this.colors.length];
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.fillStyle = this.interactionStyle.hoverFillColor ?? this.colors[labels[i] % this.colors.length];
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, radius + 1, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 
@@ -329,6 +410,7 @@ export class HyperbolicReference implements Renderer {
 
     // Brute force: check all points
     for (let i = 0; i < n; i++) {
+      if (!this.isCategoryVisible(this.dataset.labels[i])) continue;
       const dataX = positions[i * 2];
       const dataY = positions[i * 2 + 1];
       const screen = projectPoincare(dataX, dataY, view, width, height);
@@ -378,8 +460,15 @@ export class HyperbolicReference implements Renderer {
       dataPolyline[i * 2 + 1] = data.y;
     }
 
-    // Brute force selection in data space
-    const indices = lassoSelectBruteForce(this.dataset.positions, dataPolyline);
+    const indices = new Set<number>();
+    for (let i = 0; i < this.dataset.n; i++) {
+      if (!this.isCategoryVisible(this.dataset.labels[i])) continue;
+      const x = this.dataset.positions[i * 2];
+      const y = this.dataset.positions[i * 2 + 1];
+      if (pointInPolygon(x, y, dataPolyline)) {
+        indices.add(i);
+      }
+    }
 
     const computeTimeMs = performance.now() - startTime;
     return createIndicesSelectionResult(indices, computeTimeMs);
@@ -389,7 +478,11 @@ export class HyperbolicReference implements Renderer {
     if (!result.indices) {
       throw new Error('HyperbolicReference.countSelection expects indices-based selections');
     }
-    return result.indices.size;
+    let visibleCount = 0;
+    for (const i of result.indices) {
+      if (this.isPointVisibleByCategory(i)) visibleCount++;
+    }
+    return visibleCount;
   }
 
   projectToScreen(dataX: number, dataY: number): { x: number; y: number } {

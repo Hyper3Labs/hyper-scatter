@@ -51,12 +51,13 @@ import {
   HitResult,
   SelectionResult,
   SelectionGeometry,
+  CategoryVisibilityMask,
+  InteractionStyle,
   CountSelectionOptions,
   DEFAULT_COLORS,
   SELECTION_COLOR,
   HOVER_COLOR,
   createIndicesSelectionResult,
-  createGeometrySelectionResult,
 } from '../core/types.js';
 
 import {
@@ -528,6 +529,14 @@ abstract class WebGLRendererBase implements Renderer {
   protected pointRadiusCss = 3;
   protected colors: string[] = DEFAULT_COLORS;
   protected backgroundColor = '#0a0a0a';
+  protected categoryVisibilityMask = new Uint8Array(0);
+  protected hasCategoryVisibilityMask = false;
+  protected categoryAlpha = 1;
+  protected interactionStyle: Required<InteractionStyle> = {
+    selectionColor: SELECTION_COLOR,
+    hoverColor: HOVER_COLOR,
+    hoverFillColor: null,
+  };
 
   // Hyperbolic backdrop styling (Poincaré disk). Neutral grayscale defaults.
   // Override per app via InitOptions as needed.
@@ -883,6 +892,78 @@ abstract class WebGLRendererBase implements Renderer {
     this.markBackdropDirty();
   }
 
+  setPalette(colors: string[]): void {
+    this.colors = colors;
+    this.paletteDirty = true;
+    if (this.gl) {
+      this.uploadPaletteUniforms();
+    }
+  }
+
+  setCategoryVisibility(mask: CategoryVisibilityMask | null): void {
+    if (mask == null) {
+      this.categoryVisibilityMask = new Uint8Array(0);
+      this.hasCategoryVisibilityMask = false;
+    } else {
+      const n = mask.length >>> 0;
+      const next = new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        next[i] = mask[i] ? 1 : 0;
+      }
+      this.categoryVisibilityMask = next;
+      this.hasCategoryVisibilityMask = true;
+    }
+
+    if (this.hoveredIndex >= 0 && !this.isPointVisibleByCategory(this.hoveredIndex)) {
+      this.hoveredIndex = -1;
+    }
+
+    this.paletteDirty = true;
+    this.selectionDirty = true;
+    this.hoverDirty = true;
+
+    if (this.gl) {
+      this.uploadPaletteUniforms();
+      this.uploadSelectionToGPU();
+      this.uploadHoverToGPU();
+    }
+  }
+
+  setCategoryAlpha(alpha: number): void {
+    const next = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
+    if (Math.abs(next - this.categoryAlpha) <= 1e-12) return;
+    this.categoryAlpha = next;
+    this.paletteDirty = true;
+    if (this.gl) {
+      this.uploadPaletteUniforms();
+    }
+  }
+
+  setInteractionStyle(style: InteractionStyle): void {
+    if (typeof style.selectionColor === 'string' && style.selectionColor.length > 0) {
+      this.interactionStyle.selectionColor = style.selectionColor;
+    }
+    if (typeof style.hoverColor === 'string' && style.hoverColor.length > 0) {
+      this.interactionStyle.hoverColor = style.hoverColor;
+    }
+    if (Object.prototype.hasOwnProperty.call(style, 'hoverFillColor')) {
+      this.interactionStyle.hoverFillColor = style.hoverFillColor ?? null;
+    }
+  }
+
+  protected isCategoryVisible(category: number): boolean {
+    if (!this.hasCategoryVisibilityMask) return true;
+    const mask = this.categoryVisibilityMask;
+    if (category < 0 || category >= mask.length) return true;
+    return mask[category] !== 0;
+  }
+
+  protected isPointVisibleByCategory(index: number): boolean {
+    const ds = this.dataset;
+    if (!ds || index < 0 || index >= ds.n) return false;
+    return this.isCategoryVisible(ds.labels[index]);
+  }
+
   abstract setView(view: ViewState): void;
   abstract getView(): ViewState;
 
@@ -918,7 +999,11 @@ abstract class WebGLRendererBase implements Renderer {
   }
 
   setHovered(index: number): void {
-    this.hoveredIndex = index;
+    if (index >= 0 && !this.isPointVisibleByCategory(index)) {
+      this.hoveredIndex = -1;
+    } else {
+      this.hoveredIndex = index;
+    }
     this.hoverDirty = true;
 
     if (this.gl) {
@@ -1026,15 +1111,18 @@ abstract class WebGLRendererBase implements Renderer {
       this.paletteBytes[0] = 255;
       this.paletteBytes[1] = 255;
       this.paletteBytes[2] = 255;
-      this.paletteBytes[3] = 255;
+      const visible = this.isCategoryVisible(0);
+      this.paletteBytes[3] = visible ? Math.round(255 * this.categoryAlpha) : 0;
     } else {
       for (let i = 0; i < size; i++) {
         const [r, g, b, a] = parseHexColorBytes(this.colors[i]);
+        const visible = this.isCategoryVisible(i);
+        const alpha = visible ? Math.round(a * this.categoryAlpha) : 0;
         const o = i * 4;
         this.paletteBytes[o + 0] = r;
         this.paletteBytes[o + 1] = g;
         this.paletteBytes[o + 2] = b;
-        this.paletteBytes[o + 3] = a;
+        this.paletteBytes[o + 3] = alpha;
       }
     }
 
@@ -1092,7 +1180,13 @@ abstract class WebGLRendererBase implements Renderer {
     const idx = this.dataIndex;
     if (!ds || !idx) return 0;
 
-    if (result.indices) return result.indices.size;
+    if (result.indices) {
+      let visibleCount = 0;
+      for (const i of result.indices) {
+        if (this.isPointVisibleByCategory(i)) visibleCount++;
+      }
+      return visibleCount;
+    }
     if (result.kind !== 'geometry' || !result.geometry) return 0;
 
     const polygon = result.geometry.coords;
@@ -1160,6 +1254,7 @@ abstract class WebGLRendererBase implements Renderer {
         const end = offsets[cell + 1];
         for (let k = start; k < end; k++) {
           const i = ids[k];
+          if (!this.isCategoryVisible(ds.labels[i])) continue;
           const x = positions[i * 2];
           const y = positions[i * 2 + 1];
 
@@ -1636,6 +1731,7 @@ abstract class WebGLRendererBase implements Renderer {
       const lab = new Uint16Array(renderCount);
       let k = 0;
       for (const i of this.selection) {
+        if (!this.isPointVisibleByCategory(i)) continue;
         pos[k * 2] = ds.positions[i * 2];
         pos[k * 2 + 1] = ds.positions[i * 2 + 1];
         lab[k] = ds.labels[i];
@@ -1669,6 +1765,7 @@ abstract class WebGLRendererBase implements Renderer {
     const indices = new Uint32Array(renderCount);
     let k = 0;
     for (const i of this.selection) {
+      if (!this.isPointVisibleByCategory(i)) continue;
       indices[k++] = i;
       if (k >= renderCount) break;
     }
@@ -1690,7 +1787,13 @@ abstract class WebGLRendererBase implements Renderer {
       const ds = this.dataset;
       if (!ds || !this.hoverVao || !this.hoverPosBuffer || !this.hoverLabelBuffer) return;
 
-      const i = (this.hoveredIndex >= 0 && this.hoveredIndex < ds.n) ? this.hoveredIndex : -1;
+      const i = (
+        this.hoveredIndex >= 0 &&
+        this.hoveredIndex < ds.n &&
+        this.isPointVisibleByCategory(this.hoveredIndex)
+      )
+        ? this.hoveredIndex
+        : -1;
       const pos = this.hoverPosScratch;
       const lab = this.hoverLabScratch;
       if (i >= 0) {
@@ -1715,7 +1818,9 @@ abstract class WebGLRendererBase implements Renderer {
       return;
     }
 
-    const idx = this.hoveredIndex >= 0 ? this.hoveredIndex : 0;
+    const idx = this.hoveredIndex >= 0 && this.isPointVisibleByCategory(this.hoveredIndex)
+      ? this.hoveredIndex
+      : 0;
     const indices = this.hoverIndexScratch;
     indices[0] = idx;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.hoverEbo);
@@ -1870,7 +1975,7 @@ abstract class WebGLRendererBase implements Renderer {
       isInteracting,
     };
 
-    // Selection overlay (still into points buffer)
+    // Selection overlay (ring + label-colored fill, still into points buffer)
     if (!isInteracting && this.selection.size > 0) {
       gl.useProgram(this.programSolid);
       this.bindViewUniformsForProgram(this.programSolid!);
@@ -1880,11 +1985,11 @@ abstract class WebGLRendererBase implements Renderer {
       if (this.uPointRadiusSolid) gl.uniform1f(this.uPointRadiusSolid, this.pointRadiusCss + 1);
 
       if (this.uSolidColor) {
-        const [r, g, b, a] = parseHexColor(SELECTION_COLOR);
+        const [r, g, b, a] = parseHexColor(this.interactionStyle.selectionColor);
         gl.uniform4f(this.uSolidColor, r, g, b, a);
       }
-      if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 0);
-      if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 0);
+      if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 1);
+      if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 2);
       if (this.uSolidPointSizePx) gl.uniform1f(this.uSolidPointSizePx, (this.pointRadiusCss + 1) * 2 * this.dpr);
 
       if (this.gpuUsesFullDataset) {
@@ -1896,10 +2001,31 @@ abstract class WebGLRendererBase implements Renderer {
         gl.drawArrays(gl.POINTS, 0, this.selectionOverlayCount);
         gl.bindVertexArray(this.vao);
       }
+
+      const circlePoints = this.pointsCircle;
+      if (circlePoints) {
+        gl.useProgram(circlePoints.program);
+        this.bindViewUniformsForProgram(circlePoints.program);
+        if (this.paletteDirty) this.uploadPaletteUniforms();
+        this.bindPaletteTexture();
+        if (circlePoints.uCssSize) gl.uniform2f(circlePoints.uCssSize, this.width, this.height);
+        if (circlePoints.uDpr) gl.uniform1f(circlePoints.uDpr, this.dpr);
+        if (circlePoints.uPointRadius) gl.uniform1f(circlePoints.uPointRadius, this.pointRadiusCss);
+
+        if (this.gpuUsesFullDataset) {
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.selectionEbo);
+          gl.drawElements(gl.POINTS, this.selectionOverlayCount, gl.UNSIGNED_INT, 0);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+        } else if (this.selectionVao && this.selectionOverlayCount > 0) {
+          gl.bindVertexArray(this.selectionVao);
+          gl.drawArrays(gl.POINTS, 0, this.selectionOverlayCount);
+          gl.bindVertexArray(this.vao);
+        }
+      }
     }
 
     // Hover overlay (still into points buffer)
-    if (!isInteracting && this.hoveredIndex >= 0 && this.hoveredIndex < ds.n) {
+    if (!isInteracting && this.hoveredIndex >= 0 && this.hoveredIndex < ds.n && this.isPointVisibleByCategory(this.hoveredIndex)) {
       // Ring
       gl.useProgram(this.programSolid);
       this.bindViewUniformsForProgram(this.programSolid!);
@@ -1911,7 +2037,7 @@ abstract class WebGLRendererBase implements Renderer {
       const ringRadius = this.pointRadiusCss + 3;
       if (this.uPointRadiusSolid) gl.uniform1f(this.uPointRadiusSolid, ringRadius);
       if (this.uSolidColor) {
-        const [r, g, b, a] = parseHexColor(HOVER_COLOR);
+        const [r, g, b, a] = parseHexColor(this.interactionStyle.hoverColor);
         gl.uniform4f(this.uSolidColor, r, g, b, a);
       }
       if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 1);
@@ -1927,17 +2053,16 @@ abstract class WebGLRendererBase implements Renderer {
         gl.bindVertexArray(this.vao);
       }
 
-      // Fill pass (selection color if selected else palette)
+      // Fill pass (selection ring if selected else fill)
       const fillRadius = this.pointRadiusCss + 1;
       if (this.selection.has(this.hoveredIndex)) {
-        // Solid red
         if (this.uPointRadiusSolid) gl.uniform1f(this.uPointRadiusSolid, fillRadius);
         if (this.uSolidColor) {
-          const [r, g, b, a] = parseHexColor(SELECTION_COLOR);
+          const [r, g, b, a] = parseHexColor(this.interactionStyle.selectionColor);
           gl.uniform4f(this.uSolidColor, r, g, b, a);
         }
-        if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 0);
-        if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 0);
+        if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 1);
+        if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 2);
         if (this.uSolidPointSizePx) gl.uniform1f(this.uSolidPointSizePx, fillRadius * 2 * this.dpr);
         if (this.gpuUsesFullDataset) {
           gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
@@ -1946,24 +2071,64 @@ abstract class WebGLRendererBase implements Renderer {
           gl.drawArrays(gl.POINTS, 0, 1);
           gl.bindVertexArray(this.vao);
         }
-      } else {
-        // Use palette program for correct label color
-        const circlePoints = this.pointsCircle;
-        if (!circlePoints) return;
-        gl.useProgram(circlePoints.program);
-        this.bindViewUniformsForProgram(circlePoints.program);
-        if (this.paletteDirty) this.uploadPaletteUniforms();
-        this.bindPaletteTexture();
-        if (circlePoints.uCssSize) gl.uniform2f(circlePoints.uCssSize, this.width, this.height);
-        if (circlePoints.uDpr) gl.uniform1f(circlePoints.uDpr, this.dpr);
-        if (circlePoints.uPointRadius) gl.uniform1f(circlePoints.uPointRadius, fillRadius);
 
-        if (this.gpuUsesFullDataset) {
-          gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
-        } else if (this.hoverVao) {
-          gl.bindVertexArray(this.hoverVao);
-          gl.drawArrays(gl.POINTS, 0, 1);
-          gl.bindVertexArray(this.vao);
+        const circlePoints = this.pointsCircle;
+        if (circlePoints) {
+          gl.useProgram(circlePoints.program);
+          this.bindViewUniformsForProgram(circlePoints.program);
+          if (this.paletteDirty) this.uploadPaletteUniforms();
+          this.bindPaletteTexture();
+          if (circlePoints.uCssSize) gl.uniform2f(circlePoints.uCssSize, this.width, this.height);
+          if (circlePoints.uDpr) gl.uniform1f(circlePoints.uDpr, this.dpr);
+          if (circlePoints.uPointRadius) gl.uniform1f(circlePoints.uPointRadius, this.pointRadiusCss);
+
+          if (this.gpuUsesFullDataset) {
+            gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
+          } else if (this.hoverVao) {
+            gl.bindVertexArray(this.hoverVao);
+            gl.drawArrays(gl.POINTS, 0, 1);
+            gl.bindVertexArray(this.vao);
+          }
+        }
+      } else {
+        const hoverFillColor = this.interactionStyle.hoverFillColor;
+        if (hoverFillColor) {
+          gl.useProgram(this.programSolid);
+          this.bindViewUniformsForProgram(this.programSolid!);
+          if (this.uPointRadiusSolid) gl.uniform1f(this.uPointRadiusSolid, fillRadius);
+          if (this.uSolidColor) {
+            const [r, g, b, a] = parseHexColor(hoverFillColor);
+            gl.uniform4f(this.uSolidColor, r, g, b, a);
+          }
+          if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 0);
+          if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 0);
+          if (this.uSolidPointSizePx) gl.uniform1f(this.uSolidPointSizePx, fillRadius * 2 * this.dpr);
+          if (this.gpuUsesFullDataset) {
+            gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
+          } else if (this.hoverVao) {
+            gl.bindVertexArray(this.hoverVao);
+            gl.drawArrays(gl.POINTS, 0, 1);
+            gl.bindVertexArray(this.vao);
+          }
+        } else {
+          // Use palette program for category color when no hover fill override is set.
+          const circlePoints = this.pointsCircle;
+          if (!circlePoints) return;
+          gl.useProgram(circlePoints.program);
+          this.bindViewUniformsForProgram(circlePoints.program);
+          if (this.paletteDirty) this.uploadPaletteUniforms();
+          this.bindPaletteTexture();
+          if (circlePoints.uCssSize) gl.uniform2f(circlePoints.uCssSize, this.width, this.height);
+          if (circlePoints.uDpr) gl.uniform1f(circlePoints.uDpr, this.dpr);
+          if (circlePoints.uPointRadius) gl.uniform1f(circlePoints.uPointRadius, fillRadius);
+
+          if (this.gpuUsesFullDataset) {
+            gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
+          } else if (this.hoverVao) {
+            gl.bindVertexArray(this.hoverVao);
+            gl.drawArrays(gl.POINTS, 0, 1);
+            gl.bindVertexArray(this.vao);
+          }
         }
       }
 
@@ -2119,6 +2284,7 @@ export class EuclideanWebGLCandidate extends WebGLRendererBase {
       dataPt.x + dataRadius,
       dataPt.y + dataRadius,
       (i) => {
+        if (!this.isCategoryVisible(ds.labels[i])) return;
         const dataX = ds.positions[i * 2];
         const dataY = ds.positions[i * 2 + 1];
 
@@ -2193,15 +2359,19 @@ export class EuclideanWebGLCandidate extends WebGLRendererBase {
     const bounds = { xMin: minX, yMin: minY, xMax: maxX, yMax: maxY };
     const geometry: SelectionGeometry = { type: 'polygon', coords: dataPolyline, bounds };
     const computeTimeMs = performance.now() - startTime;
-    return createGeometrySelectionResult(
+    return {
+      kind: 'geometry',
       geometry,
-      ds.positions,
       computeTimeMs,
-      (px, py, polygon) => {
+      has: (index: number) => {
+        if (index < 0 || index >= ds.n) return false;
+        if (!this.isCategoryVisible(ds.labels[index])) return false;
+        const px = ds.positions[index * 2];
+        const py = ds.positions[index * 2 + 1];
         if (px < bounds.xMin || px > bounds.xMax || py < bounds.yMin || py > bounds.yMax) return false;
-        return pointInPolygon(px, py, polygon);
-      }
-    );
+        return pointInPolygon(px, py, dataPolyline);
+      },
+    };
   }
 
   projectToScreen(dataX: number, dataY: number): { x: number; y: number } {
@@ -2424,6 +2594,7 @@ export class HyperbolicWebGLCandidate extends WebGLRendererBase {
       dataPt.x + queryRadius,
       dataPt.y + queryRadius,
       (i) => {
+        if (!this.isCategoryVisible(ds.labels[i])) return;
         const dataX = ds.positions[i * 2];
         const dataY = ds.positions[i * 2 + 1];
 
@@ -2558,15 +2729,19 @@ export class HyperbolicWebGLCandidate extends WebGLRendererBase {
     const bounds = { xMin: minX, yMin: minY, xMax: maxX, yMax: maxY };
     const geometry: SelectionGeometry = { type: 'polygon', coords: dataPolyline, bounds };
     const computeTimeMs = performance.now() - startTime;
-    return createGeometrySelectionResult(
+    return {
+      kind: 'geometry',
       geometry,
-      ds.positions,
       computeTimeMs,
-      (px, py, polygon) => {
+      has: (index: number) => {
+        if (index < 0 || index >= ds.n) return false;
+        if (!this.isCategoryVisible(ds.labels[index])) return false;
+        const px = ds.positions[index * 2];
+        const py = ds.positions[index * 2 + 1];
         if (px < bounds.xMin || px > bounds.xMax || py < bounds.yMin || py > bounds.yMax) return false;
-        return pointInPolygon(px, py, polygon);
-      }
-    );
+        return pointInPolygon(px, py, dataPolyline);
+      },
+    };
   }
 
   projectToScreen(dataX: number, dataY: number): { x: number; y: number } {

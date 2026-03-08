@@ -10,6 +10,7 @@
  *   npm run bench -- --headless                # Run without browser window
  *   npm run bench -- --points=100000,500000    # Custom point counts
  *   npm run bench -- --geometries=poincare     # Only test poincare
+ *   npm run bench -- --geometries=euclidean,poincare,euclidean3d,sphere
  */
 
 import puppeteer, { Browser, Page } from 'puppeteer';
@@ -32,11 +33,13 @@ interface BenchConfig {
   renderer: 'webgl' | 'reference';
   lassoRadiusScale?: number;
   pointCounts: number[];
-  geometries: ('euclidean' | 'poincare')[];
+  geometries: BenchGeometry[];
   measuredFrames: number;
   hitTestSamples: number;
   timeout: number;  // ms per benchmark
 }
+
+type BenchGeometry = 'euclidean' | 'poincare' | 'euclidean3d' | 'sphere';
 
 const DEFAULT_CONFIG: BenchConfig = {
   headless: false,  // Show browser by default so user can see progress
@@ -204,7 +207,7 @@ async function runBenchmarks(
     renderer: 'webgl' | 'reference';
     lassoRadiusScale?: number;
     pointCounts: number[];
-    geometries: ('euclidean' | 'poincare')[];
+    geometries: BenchGeometry[];
     measuredFrames: number;
     hitTestSamples: number;
   }) => {
@@ -293,25 +296,17 @@ function formatResults(report: BenchmarkReport): string {
   lines.push('═'.repeat(120));
 
   // Summary
-  const eucResults = report.results.filter(r => r.geometry === 'euclidean');
-  const poincareResults = report.results.filter(r => r.geometry === 'poincare');
+  const geometries = Array.from(new Set(report.results.map((r) => r.geometry)));
+  for (const geometry of geometries) {
+    const rows = report.results.filter((r) => r.geometry === geometry);
+    if (rows.length === 0) continue;
 
-  if (eucResults.length > 0) {
-    const maxPts = Math.max(...eucResults.map(r => r.points));
-    const maxResult = eucResults.find(r => r.points === maxPts);
-    if (maxResult) {
-      const fps = (1000 / maxResult.frameIntervalMs.avg).toFixed(1);
-      lines.push(`\x1b[1mEuclidean max:\x1b[0m ${maxPts.toLocaleString()} points @ ${fps} FPS (${maxResult.renderMs.avg.toFixed(2)}ms CPU)`);
-    }
-  }
+    const maxPts = Math.max(...rows.map((r) => r.points));
+    const maxResult = rows.find((r) => r.points === maxPts);
+    if (!maxResult) continue;
 
-  if (poincareResults.length > 0) {
-    const maxPts = Math.max(...poincareResults.map(r => r.points));
-    const maxResult = poincareResults.find(r => r.points === maxPts);
-    if (maxResult) {
-      const fps = (1000 / maxResult.frameIntervalMs.avg).toFixed(1);
-      lines.push(`\x1b[1mPoincaré max:\x1b[0m  ${maxPts.toLocaleString()} points @ ${fps} FPS (${maxResult.renderMs.avg.toFixed(2)}ms CPU)`);
-    }
+    const fps = (1000 / maxResult.frameIntervalMs.avg).toFixed(1);
+    lines.push(`\x1b[1m${geometry} max:\x1b[0m ${maxPts.toLocaleString()} points @ ${fps} FPS (${maxResult.renderMs.avg.toFixed(2)}ms CPU)`);
   }
 
   lines.push('');
@@ -339,7 +334,10 @@ function parseArgs(): Partial<BenchConfig> {
       args.pointCounts = points.filter(n => !isNaN(n) && n > 0);
     } else if (arg.startsWith('--geometries=')) {
       const geos = arg.slice('--geometries='.length).split(',');
-      args.geometries = geos.filter(g => g === 'euclidean' || g === 'poincare') as any;
+      args.geometries = geos.filter(
+        (g): g is BenchGeometry =>
+          g === 'euclidean' || g === 'poincare' || g === 'euclidean3d' || g === 'sphere'
+      );
     } else if (arg.startsWith('--dpr=')) {
       const v = Number(arg.slice('--dpr='.length));
       if (Number.isFinite(v) && v > 0) args.dpr = v;
@@ -387,6 +385,13 @@ function parseArgs(): Partial<BenchConfig> {
 
 async function main() {
   const config: BenchConfig = { ...DEFAULT_CONFIG, ...parseArgs() };
+
+  if (
+    config.renderer === 'reference' &&
+    config.geometries.some((g) => g === 'euclidean3d' || g === 'sphere')
+  ) {
+    throw new Error("Reference renderer supports only euclidean and poincare; use renderer=webgl for 3D geometries.");
+  }
 
   console.log('\x1b[1m\x1b[36m[Browser Benchmark]\x1b[0m Starting...');
   console.log(`  Points: ${config.pointCounts.join(', ')}`);

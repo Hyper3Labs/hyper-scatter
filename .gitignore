@@ -8,3 +8,5 @@ dist-lib/
 research/
 scripts/
 .playwright-mcp/
+context/
+.specstory/

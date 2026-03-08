@@ -1,4 +1,5 @@
 import type { Dataset, GeometryMode } from './core/types.js';
+import type { Dataset3D, GeometryMode3D } from './core/types3d.js';
 
 export type {
   Dataset,
@@ -13,7 +14,23 @@ export type {
   Bounds2D,
   SelectionGeometry,
   SelectionResult,
+  CountSelectionOptions,
+  CategoryVisibilityMask,
+  InteractionStyle,
+  DisplayStateRenderer,
 } from './core/types.js';
+
+export type {
+  Dataset3D,
+  GeometryMode3D,
+  Renderer3D,
+  InitOptions3D,
+  OrbitViewState3D,
+  Modifiers3D,
+  HitResult3D,
+  ProjectedPoint3D,
+  SelectionResult3D,
+} from './core/types3d.js';
 
 export {
   DEFAULT_COLORS,
@@ -25,6 +42,11 @@ export {
   EuclideanWebGLCandidate,
   HyperbolicWebGLCandidate,
 } from './impl_candidate/webgl_candidate.js';
+
+export {
+  Euclidean3DWebGLCandidate,
+  Spherical3DWebGLCandidate,
+} from './impl_candidate/webgl_candidate_3d.js';
 
 export {
   createInteractionController,
@@ -61,6 +83,30 @@ export function createDataset(
   };
 }
 
+export function createDataset3D(
+  geometry: GeometryMode3D,
+  positions: Float32Array,
+  labels?: Uint16Array,
+): Dataset3D {
+  if (positions.length % 3 !== 0) {
+    throw new Error(`positions length must be divisible by 3 (got ${positions.length})`);
+  }
+
+  const n = positions.length / 3;
+  const labelArray = labels ?? new Uint16Array(n);
+
+  if (labelArray.length !== n) {
+    throw new Error(`labels length must equal number of points (${n}), got ${labelArray.length}`);
+  }
+
+  return {
+    n,
+    positions,
+    labels: labelArray,
+    geometry,
+  };
+}
+
 export function packPositions(points: ReadonlyArray<readonly [number, number]>): Float32Array {
   const out = new Float32Array(points.length * 2);
   for (let i = 0; i < points.length; i++) {
@@ -80,6 +126,24 @@ export function packPositionsXY(x: ArrayLike<number>, y: ArrayLike<number>): Flo
   for (let i = 0; i < x.length; i++) {
     out[i * 2] = x[i];
     out[i * 2 + 1] = y[i];
+  }
+  return out;
+}
+
+export function packPositionsXYZ(
+  x: ArrayLike<number>,
+  y: ArrayLike<number>,
+  z: ArrayLike<number>,
+): Float32Array {
+  if (x.length !== y.length || x.length !== z.length) {
+    throw new Error(`x/y/z length mismatch: ${x.length} vs ${y.length} vs ${z.length}`);
+  }
+
+  const out = new Float32Array(x.length * 3);
+  for (let i = 0; i < x.length; i++) {
+    out[i * 3] = x[i];
+    out[i * 3 + 1] = y[i];
+    out[i * 3 + 2] = z[i];
   }
   return out;
 }

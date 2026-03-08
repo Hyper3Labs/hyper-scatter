@@ -120,6 +120,28 @@ export interface SelectionResult {
 
 export type InteractionMode = 'pan' | 'lasso';
 
+export type CategoryVisibilityMask = ArrayLike<number | boolean>;
+
+export interface InteractionStyle {
+  /** Color for the selected ring/halo. */
+  selectionColor?: string;
+  /** Color for the hovered ring/outline. */
+  hoverColor?: string;
+  /** Optional fill override for hovered, non-selected points. */
+  hoverFillColor?: string | null;
+}
+
+export interface DisplayStateRenderer {
+  /** Update the categorical palette without replacing the dataset. */
+  setPalette(colors: string[]): void;
+  /** Set a per-category visibility mask (truthy = visible). */
+  setCategoryVisibility(mask: CategoryVisibilityMask | null): void;
+  /** Apply a global alpha multiplier to visible categories only. */
+  setCategoryAlpha(alpha: number): void;
+  /** Update hover/selection interaction colors at runtime. */
+  setInteractionStyle(style: InteractionStyle): void;
+}
+
 // ============================================================================
 // Renderer Contract
 // ============================================================================
@@ -141,7 +163,7 @@ export interface InitOptions {
 
 }
 
-export interface Renderer {
+export interface Renderer extends DisplayStateRenderer {
   /** Initialize the renderer with a canvas */
   init(canvas: HTMLCanvasElement, opts: InitOptions): void;
 

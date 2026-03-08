@@ -4,13 +4,18 @@
  */
 
 import { Dataset, GeometryMode, Renderer, InteractionMode, Modifiers, SelectionResult } from '../core/types.js';
+import { Dataset3D, GeometryMode3D, Renderer3D, SelectionResult3D } from '../core/types3d.js';
 import { generateDataset, type DatasetDistribution } from '../core/dataset.js';
 import { EuclideanReference } from '../impl_reference/euclidean_reference.js';
 import { HyperbolicReference } from '../impl_reference/hyperbolic_reference.js';
 import { EuclideanWebGLCandidate, HyperbolicWebGLCandidate } from '../impl_candidate/webgl_candidate.js';
+import { Euclidean3DWebGLCandidate, Spherical3DWebGLCandidate } from '../impl_candidate/webgl_candidate_3d.js';
 import { simplifyPolygonData } from '../core/lasso_simplify.js';
 
 type RendererType = 'webgl' | 'reference';
+type GeometryChoice = GeometryMode | GeometryMode3D;
+type AnyRenderer = Renderer | Renderer3D;
+type AnyDataset = Dataset | Dataset3D;
 
 // DOM elements
 let canvas = document.getElementById('canvas') as HTMLCanvasElement;
@@ -26,6 +31,9 @@ const labelCountInput = document.getElementById('labelCount') as HTMLInputElemen
 const labelCountLabel = document.getElementById('labelCountLabel') as HTMLSpanElement | null;
 const seedInput = document.getElementById('seed') as HTMLInputElement;
 const modeIndicator = document.getElementById('modeIndicator') as HTMLSpanElement;
+const rendererWebglInput = document.getElementById('rendWebgl') as HTMLInputElement;
+const rendererReferenceInput = document.getElementById('rendRef') as HTMLInputElement;
+const rendererReferenceLabel = document.querySelector('label[for="rendRef"]') as HTMLLabelElement | null;
 
 // Stats elements
 const statPoints = document.getElementById('statPoints') as HTMLSpanElement;
@@ -35,10 +43,10 @@ const statFrameTime = document.getElementById('statFrameTime') as HTMLSpanElemen
 const statLassoTime = document.getElementById('statLassoTime') as HTMLSpanElement;
 
 // State
-let renderer: Renderer | null = null;
-let dataset: Dataset | null = null;
+let renderer: AnyRenderer | null = null;
+let dataset: AnyDataset | null = null;
 let lastDatasetKey = '';
-let currentGeometry: GeometryMode = 'euclidean';
+let currentGeometry: GeometryChoice = 'euclidean';
 let currentRendererType: RendererType = 'webgl';
 let mode: InteractionMode = 'pan';
 
@@ -66,7 +74,8 @@ let lastMouseY = 0;
 // - Gesture: Shift + Meta/Ctrl drag (momentary) starts lasso.
 // - Lasso vertices are simplified continuously while dragging.
 // - The lasso overlay persists after mouse-up until explicitly cleared.
-// - The persistent overlay is stored in DATA SPACE so it tracks pan/zoom.
+// - Any camera movement (pan/zoom) clears persisted lasso because the old
+//   polygon is no longer guaranteed to represent an accurate range in view.
 const LASSO_MAX_VERTS_INTERACTION = 24;
 const LASSO_MAX_VERTS_FINAL = 24;
 const LASSO_MIN_SAMPLE_DIST_PX = 2.0;
@@ -75,9 +84,11 @@ const LASSO_MIN_SAMPLE_DIST_PX = 2.0;
 // We sample in data space (Embedding Atlas style) so simplification is
 // view-invariant and avoids screen-space artifacts.
 let lassoRawDataPoints: number[] = [];
+let lassoRawScreenPoints: number[] = [];
 
 // Current simplified lasso polygon in DATA SPACE (interleaved x,y).
 let lassoActiveDataPolygon: Float32Array | null = null;
+let lassoActiveScreenPolygon: Float32Array | null = null;
 
 // For sampling thresholding (screen space).
 let lassoLastScreenX = 0;
@@ -86,15 +97,124 @@ let lassoDirty = false;
 
 // Persisted range selection (data-space polygon: interleaved x,y).
 let rangeSelectionDataPolygon: Float32Array | null = null;
+let rangeSelectionScreenPolygon: Float32Array | null = null;
+
+function is3DGeometry(geometry: GeometryChoice): geometry is GeometryMode3D {
+  return geometry === 'euclidean3d' || geometry === 'sphere';
+}
+
+function syncRendererAvailabilityForGeometry(geometry: GeometryChoice): void {
+  const needsWebGL = is3DGeometry(geometry);
+  rendererReferenceInput.disabled = needsWebGL;
+
+  if (needsWebGL && rendererReferenceInput.checked) {
+    rendererWebglInput.checked = true;
+  }
+
+  if (rendererReferenceLabel) {
+    rendererReferenceLabel.title = needsWebGL
+      ? 'Reference renderer is available only for 2D geometries'
+      : '';
+  }
+}
+
+function createRng(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(1664525, state) + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
+function randomUnitVector(rand: () => number): [number, number, number] {
+  const u = rand() * 2 - 1;
+  const theta = rand() * Math.PI * 2;
+  const s = Math.sqrt(Math.max(0, 1 - u * u));
+  return [s * Math.cos(theta), u, s * Math.sin(theta)];
+}
+
+function generateDataset3D(options: {
+  seed: number;
+  n: number;
+  labelCount: number;
+  geometry: GeometryMode3D;
+  distribution: DatasetDistribution;
+}): Dataset3D {
+  const { seed, n, labelCount, geometry, distribution } = options;
+  const positions = new Float32Array(n * 3);
+  const labels = new Uint16Array(n);
+  const rand = createRng(seed);
+
+  const clusterCount = Math.max(2, Math.min(16, labelCount));
+  const centers: Array<[number, number, number]> = [];
+  if (distribution === 'clustered') {
+    for (let i = 0; i < clusterCount; i++) {
+      if (geometry === 'sphere') {
+        centers.push(randomUnitVector(rand));
+      } else {
+        centers.push([
+          (rand() * 2 - 1) * 1.1,
+          (rand() * 2 - 1) * 1.1,
+          (rand() * 2 - 1) * 1.1,
+        ]);
+      }
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    const label = labelCount > 0 ? Math.floor(rand() * labelCount) : 0;
+    labels[i] = label;
+
+    let x: number;
+    let y: number;
+    let z: number;
+
+    if (distribution === 'clustered') {
+      const c = centers[label % centers.length];
+
+      if (geometry === 'sphere') {
+        const jx = c[0] + (rand() * 2 - 1) * 0.22;
+        const jy = c[1] + (rand() * 2 - 1) * 0.22;
+        const jz = c[2] + (rand() * 2 - 1) * 0.22;
+        const invLen = 1 / Math.max(1e-9, Math.hypot(jx, jy, jz));
+        x = jx * invLen;
+        y = jy * invLen;
+        z = jz * invLen;
+      } else {
+        x = c[0] + (rand() * 2 - 1) * 0.35;
+        y = c[1] + (rand() * 2 - 1) * 0.35;
+        z = c[2] + (rand() * 2 - 1) * 0.35;
+      }
+    } else if (geometry === 'sphere') {
+      [x, y, z] = randomUnitVector(rand);
+    } else {
+      x = (rand() * 2 - 1) * 1.5;
+      y = (rand() * 2 - 1) * 1.5;
+      z = (rand() * 2 - 1) * 1.5;
+    }
+
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = z;
+  }
+
+  return {
+    n,
+    positions,
+    labels,
+    geometry,
+  };
+}
 
 function projectDataPolygonToScreen(polyData: Float32Array): Float32Array {
-  if (!renderer) return polyData;
+  if (!renderer || is3DGeometry(currentGeometry)) return polyData;
   const n = polyData.length / 2;
   const out = new Float32Array(polyData.length);
+  const renderer2D = renderer as Renderer;
   for (let i = 0; i < n; i++) {
     const x = polyData[i * 2];
     const y = polyData[i * 2 + 1];
-    const s = renderer.projectToScreen(x, y);
+    const s = renderer2D.projectToScreen(x, y);
     out[i * 2] = s.x;
     out[i * 2 + 1] = s.y;
   }
@@ -106,21 +226,45 @@ let selectionJobId = 0;
 
 async function countSelectionAsync(
   jobId: number,
-  result: SelectionResult,
+  result: SelectionResult | SelectionResult3D,
 ): Promise<void> {
   if (!renderer) return;
 
-  const total = await renderer.countSelection(result, {
-    shouldCancel: () => jobId !== selectionJobId,
-    onProgress: (selectedCount) => {
-      if (jobId !== selectionJobId) return;
-      statSelected.textContent = `${selectedCount.toLocaleString()} (computing…)`;
-    },
-    yieldEveryMs: 8,
-  });
+  const total = is3DGeometry(currentGeometry)
+    ? await (renderer as Renderer3D).countSelection(result as SelectionResult3D)
+    : await (renderer as Renderer).countSelection(result as SelectionResult, {
+        shouldCancel: () => jobId !== selectionJobId,
+        onProgress: (selectedCount) => {
+          if (jobId !== selectionJobId) return;
+          statSelected.textContent = `${selectedCount.toLocaleString()} (computing…)`;
+        },
+        yieldEveryMs: 8,
+      });
 
   if (jobId !== selectionJobId) return;
   statSelected.textContent = total.toLocaleString();
+}
+
+function clearPersistentRangeSelection(opts: { cancelSelectionJob?: boolean; resetStats?: boolean } = {}): void {
+  const hadPersistent = rangeSelectionDataPolygon !== null || rangeSelectionScreenPolygon !== null;
+  if (!hadPersistent) return;
+
+  rangeSelectionDataPolygon = null;
+  rangeSelectionScreenPolygon = null;
+
+  if (opts.cancelSelectionJob ?? true) {
+    // Cancel in-flight counting because the persisted lasso predicate changed.
+    selectionJobId++;
+  }
+
+  if (opts.resetStats) {
+    statSelected.textContent = '0';
+    statLassoTime.textContent = '—';
+  }
+
+  overlayCanvas.style.display = 'none';
+  const ctx = overlayCanvas.getContext('2d');
+  if (ctx) ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 }
 
 // Frame scheduling + throttling
@@ -146,7 +290,7 @@ const frameIntervals: number[] = [];
 declare global {
   interface Window {
     __vizDemo?: {
-      getRenderer: () => Renderer | null;
+      getRenderer: () => AnyRenderer | null;
       getView: () => any;
       getCanvasSize: () => { cssWidth: number; cssHeight: number; bufferWidth: number; bufferHeight: number };
     };
@@ -211,16 +355,18 @@ function getVizThemeColors(): {
 /**
  * Initialize the renderer based on geometry and renderer type.
  */
-function initRenderer(geometry: GeometryMode, rendererType: RendererType): void {
+function initRenderer(geometry: GeometryChoice, rendererType: RendererType): void {
+  const effectiveRendererType: RendererType = is3DGeometry(geometry) ? 'webgl' : rendererType;
+
   if (renderer) {
     renderer.destroy();
   }
 
   // Replace canvas when switching between WebGL and 2D contexts
   // A canvas can only have one context type
-  const needsNewCanvas = currentRendererType !== rendererType ||
-    (rendererType === 'webgl' && !canvas.getContext('webgl2')) ||
-    (rendererType === 'reference' && !canvas.getContext('2d'));
+  const needsNewCanvas = currentRendererType !== effectiveRendererType ||
+    (effectiveRendererType === 'webgl' && !canvas.getContext('webgl2')) ||
+    (effectiveRendererType === 'reference' && !canvas.getContext('2d'));
 
   if (needsNewCanvas) {
     replaceCanvas();
@@ -233,11 +379,15 @@ function initRenderer(geometry: GeometryMode, rendererType: RendererType): void 
   // Keep overlay canvas in sync regardless of renderer type.
   resizeOverlay(width, height);
 
-  if (rendererType === 'webgl') {
+  if (effectiveRendererType === 'webgl') {
     if (geometry === 'euclidean') {
       renderer = new EuclideanWebGLCandidate();
-    } else {
+    } else if (geometry === 'poincare') {
       renderer = new HyperbolicWebGLCandidate();
+    } else if (geometry === 'euclidean3d') {
+      renderer = new Euclidean3DWebGLCandidate();
+    } else {
+      renderer = new Spherical3DWebGLCandidate();
     }
     canvasHeader.textContent = 'WebGL';
   } else {
@@ -250,18 +400,29 @@ function initRenderer(geometry: GeometryMode, rendererType: RendererType): void 
   }
 
   const theme = getVizThemeColors();
-  renderer.init(canvas, {
-    width,
-    height,
-    devicePixelRatio: window.devicePixelRatio,
-    backgroundColor: theme.backgroundColor,
-    poincareDiskFillColor: theme.diskFillColor,
-    poincareDiskBorderColor: theme.diskBorderColor,
-    poincareGridColor: theme.gridColor,
-  });
+  if (is3DGeometry(geometry)) {
+    (renderer as Renderer3D).init(canvas, {
+      width,
+      height,
+      devicePixelRatio: window.devicePixelRatio,
+      backgroundColor: theme.backgroundColor,
+      sphereGuideColor: theme.diskBorderColor,
+      sphereGuideOpacity: 0.25,
+    });
+  } else {
+    (renderer as Renderer).init(canvas, {
+      width,
+      height,
+      devicePixelRatio: window.devicePixelRatio,
+      backgroundColor: theme.backgroundColor,
+      poincareDiskFillColor: theme.diskFillColor,
+      poincareDiskBorderColor: theme.diskBorderColor,
+      poincareGridColor: theme.gridColor,
+    });
+  }
 
   currentGeometry = geometry;
-  currentRendererType = rendererType;
+  currentRendererType = effectiveRendererType;
 }
 
 function resizeOverlay(width: number, height: number): void {
@@ -279,9 +440,9 @@ function resizeOverlay(width: number, height: number): void {
   ctx.clearRect(0, 0, width, height);
 }
 
-function getSelectedGeometry(): GeometryMode {
+function getSelectedGeometry(): GeometryChoice {
   const el = document.querySelector<HTMLInputElement>('input[name="geometry"]:checked');
-  return (el?.value as GeometryMode) ?? 'euclidean';
+  return (el?.value as GeometryChoice) ?? 'euclidean';
 }
 
 function getSelectedRendererType(): RendererType {
@@ -321,8 +482,10 @@ function scheduleGenerateAndLoad(): void {
  * Generate and load a new dataset.
  */
 function generateAndLoad(): void {
-  const rendererType = getSelectedRendererType();
   const geometry = getSelectedGeometry();
+  syncRendererAvailabilityForGeometry(geometry);
+
+  const rendererType = getSelectedRendererType();
   const n = getPointCount();
   const labelCount = parseInt(labelCountInput.value, 10);
   const seed = parseInt(seedInput.value, 10);
@@ -341,18 +504,32 @@ function generateAndLoad(): void {
 
   // Generate dataset only if inputs changed.
   if (needsNewDataset) {
-    dataset = generateDataset({
-      seed,
-      n,
-      labelCount,
-      geometry,
-      distribution,
-    });
+    if (is3DGeometry(geometry)) {
+      dataset = generateDataset3D({
+        seed,
+        n,
+        labelCount,
+        geometry,
+        distribution,
+      });
+    } else {
+      dataset = generateDataset({
+        seed,
+        n,
+        labelCount,
+        geometry,
+        distribution,
+      });
+    }
     lastDatasetKey = datasetKey;
   }
 
   // Load dataset
-  renderer!.setDataset(dataset!);
+  if (is3DGeometry(geometry)) {
+    (renderer as Renderer3D).setDataset(dataset as Dataset3D);
+  } else {
+    (renderer as Renderer).setDataset(dataset as Dataset);
+  }
 
   // Update stats
   statPoints.textContent = n.toLocaleString();
@@ -364,6 +541,8 @@ function generateAndLoad(): void {
   frameTimes.length = 0; // Reset frame time tracking
   frameIntervals.length = 0;
   lastRafTs = 0;
+  rangeSelectionDataPolygon = null;
+  rangeSelectionScreenPolygon = null;
 
   // Clear overlay UI.
   {
@@ -420,6 +599,7 @@ function render(): void {
   // Apply coalesced pan at most once per frame.
   // Important: apply even if the drag ended before this frame executed.
   if (renderer && (pendingPanDx !== 0 || pendingPanDy !== 0)) {
+    clearPersistentRangeSelection({ resetStats: true });
     renderer.pan(pendingPanDx, pendingPanDy, pendingModifiers);
     pendingPanDx = 0;
     pendingPanDy = 0;
@@ -463,10 +643,18 @@ function render(): void {
     // (Embedding Atlas uses simplifyPolygon(points, 24).)
     if (lassoDirty) {
       lassoDirty = false;
-      if (lassoRawDataPoints.length >= 6) {
-        lassoActiveDataPolygon = simplifyPolygonData(lassoRawDataPoints, LASSO_MAX_VERTS_INTERACTION);
+      if (is3DGeometry(currentGeometry)) {
+        if (lassoRawScreenPoints.length >= 6) {
+          lassoActiveScreenPolygon = simplifyPolygonData(lassoRawScreenPoints, LASSO_MAX_VERTS_INTERACTION);
+        } else {
+          lassoActiveScreenPolygon = null;
+        }
       } else {
-        lassoActiveDataPolygon = null;
+        if (lassoRawDataPoints.length >= 6) {
+          lassoActiveDataPolygon = simplifyPolygonData(lassoRawDataPoints, LASSO_MAX_VERTS_INTERACTION);
+        } else {
+          lassoActiveDataPolygon = null;
+        }
       }
     }
   }
@@ -474,15 +662,27 @@ function render(): void {
   // Overlay rendering is UI-only; keep it decoupled from WebGL.
   // - While dragging, draw the (simplified) in-progress lasso in screen space.
   // - When not dragging, draw the persisted lasso projected from data space.
-  if (isLassoing && lassoActiveDataPolygon && lassoActiveDataPolygon.length >= 6) {
-    drawLassoData(lassoActiveDataPolygon);
-  } else if (rangeSelectionDataPolygon && rangeSelectionDataPolygon.length >= 6) {
-    drawLassoData(rangeSelectionDataPolygon);
+  if (is3DGeometry(currentGeometry)) {
+    if (isLassoing && lassoActiveScreenPolygon && lassoActiveScreenPolygon.length >= 6) {
+      drawLassoScreen(lassoActiveScreenPolygon);
+    } else if (rangeSelectionScreenPolygon && rangeSelectionScreenPolygon.length >= 6) {
+      drawLassoScreen(rangeSelectionScreenPolygon);
+    } else {
+      overlayCanvas.style.display = 'none';
+      const ctx = overlayCanvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    }
   } else {
-    // Nothing to show.
-    overlayCanvas.style.display = 'none';
-    const ctx = overlayCanvas.getContext('2d');
-    if (ctx) ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    if (isLassoing && lassoActiveDataPolygon && lassoActiveDataPolygon.length >= 6) {
+      drawLassoData(lassoActiveDataPolygon);
+    } else if (rangeSelectionDataPolygon && rangeSelectionDataPolygon.length >= 6) {
+      drawLassoData(rangeSelectionDataPolygon);
+    } else {
+      // Nothing to show.
+      overlayCanvas.style.display = 'none';
+      const ctx = overlayCanvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    }
   }
 }
 
@@ -551,12 +751,9 @@ function handleMouseDown(e: MouseEvent): void {
   const wantsLasso = e.shiftKey && (e.metaKey || e.ctrlKey);
 
   // Plain click clears the persistent range selection (lasso overlay).
-  // This matches the Embedding Atlas behavior: rangeSelection persists until cleared.
   // NOTE: We only clear range selection here; point selection is preserved.
-  if (!wantsLasso && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && rangeSelectionDataPolygon) {
-    rangeSelectionDataPolygon = null;
-    // Cancel any in-flight selection materialization since the predicate changed.
-    selectionJobId++;
+  if (!wantsLasso && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (rangeSelectionDataPolygon || rangeSelectionScreenPolygon)) {
+    clearPersistentRangeSelection({ resetStats: true });
     requestRender();
   }
 
@@ -565,9 +762,18 @@ function handleMouseDown(e: MouseEvent): void {
     mode = 'lasso';
     isLassoing = true;
     overlayCanvas.style.display = 'block';
-    const d0 = renderer.unprojectFromScreen(x, y);
-    lassoRawDataPoints = [d0.x, d0.y];
-    lassoActiveDataPolygon = null;
+    if (is3DGeometry(currentGeometry)) {
+      lassoRawScreenPoints = [x, y];
+      lassoRawDataPoints = [];
+      lassoActiveScreenPolygon = null;
+      lassoActiveDataPolygon = null;
+    } else {
+      const d0 = (renderer as Renderer).unprojectFromScreen(x, y);
+      lassoRawDataPoints = [d0.x, d0.y];
+      lassoRawScreenPoints = [];
+      lassoActiveDataPolygon = null;
+      lassoActiveScreenPolygon = null;
+    }
     lassoLastScreenX = x;
     lassoLastScreenY = y;
     lassoDirty = true;
@@ -624,8 +830,12 @@ function handleMouseMove(e: MouseEvent): void {
     const dy = y - lassoLastScreenY;
     if (dx * dx + dy * dy >= LASSO_MIN_SAMPLE_DIST_PX * LASSO_MIN_SAMPLE_DIST_PX) {
       if (renderer) {
-        const d = renderer.unprojectFromScreen(x, y);
-        lassoRawDataPoints.push(d.x, d.y);
+        if (is3DGeometry(currentGeometry)) {
+          lassoRawScreenPoints.push(x, y);
+        } else {
+          const d = (renderer as Renderer).unprojectFromScreen(x, y);
+          lassoRawDataPoints.push(d.x, d.y);
+        }
         lassoDirty = true;
       }
       lassoLastScreenX = x;
@@ -646,33 +856,51 @@ function handleMouseUp(_e: MouseEvent): void {
   // Otherwise, releasing the mouse before the scheduled rAF frame runs can
   // drop the final (or entire) pan and appear as if the view snaps back.
   if (renderer && (pendingPanDx !== 0 || pendingPanDy !== 0)) {
+    clearPersistentRangeSelection({ resetStats: true });
     renderer.pan(pendingPanDx, pendingPanDy, pendingModifiers);
     pendingPanDx = 0;
     pendingPanDy = 0;
   }
 
-  if (isLassoing && renderer && lassoRawDataPoints.length >= 6) {
-    // Complete lasso selection.
-    const dataPoly = lassoActiveDataPolygon ?? simplifyPolygonData(lassoRawDataPoints, LASSO_MAX_VERTS_FINAL);
-    const screenPolyline = projectDataPolygonToScreen(dataPoly);
-    const result = renderer.lassoSelect(screenPolyline);
+  if (isLassoing && renderer) {
+    if (is3DGeometry(currentGeometry)) {
+      if (lassoRawScreenPoints.length >= 6) {
+        const screenPolyline = lassoActiveScreenPolygon ?? simplifyPolygonData(lassoRawScreenPoints, LASSO_MAX_VERTS_FINAL);
+        const result = (renderer as Renderer3D).lassoSelect(screenPolyline);
+        rangeSelectionScreenPolygon = screenPolyline;
+        rangeSelectionDataPolygon = null;
 
-    // Persist the range selection overlay in DATA SPACE (so it tracks pan/zoom).
-    rangeSelectionDataPolygon = dataPoly;
+        renderer.setSelection(new Set());
+        statSelected.textContent = '…';
+        const jobId = ++selectionJobId;
+        void countSelectionAsync(jobId, result);
+        statLassoTime.textContent = `${result.computeTimeMs.toFixed(2)}ms`;
+      }
+    } else if (lassoRawDataPoints.length >= 6) {
+      const dataPoly = lassoActiveDataPolygon ?? simplifyPolygonData(lassoRawDataPoints, LASSO_MAX_VERTS_FINAL);
+      const screenPolyline = projectDataPolygonToScreen(dataPoly);
+      const result = (renderer as Renderer).lassoSelect(screenPolyline);
 
-    // Apply selection (Embedding Atlas style): keep only the range-selection
-    // overlay (no point highlighting) and compute an exact count asynchronously.
-    renderer.setSelection(new Set());
-    statSelected.textContent = '…';
-    const jobId = ++selectionJobId;
-    void countSelectionAsync(jobId, result);
-    statLassoTime.textContent = `${result.computeTimeMs.toFixed(2)}ms`;
+      // Persist the range selection overlay in DATA SPACE (so it tracks pan/zoom).
+      rangeSelectionDataPolygon = dataPoly;
+      rangeSelectionScreenPolygon = null;
+
+      // Apply selection (Embedding Atlas style): keep only the range-selection
+      // overlay (no point highlighting) and compute an exact count asynchronously.
+      renderer.setSelection(new Set());
+      statSelected.textContent = '…';
+      const jobId = ++selectionJobId;
+      void countSelectionAsync(jobId, result);
+      statLassoTime.textContent = `${result.computeTimeMs.toFixed(2)}ms`;
+    }
   }
 
   isDragging = false;
   isLassoing = false;
   lassoRawDataPoints = [];
+  lassoRawScreenPoints = [];
   lassoActiveDataPolygon = null;
+  lassoActiveScreenPolygon = null;
   lassoDirty = false;
   pendingPanDx = 0;
   pendingPanDy = 0;
@@ -686,8 +914,8 @@ function handleMouseUp(_e: MouseEvent): void {
     (renderer as any).endInteraction();
   }
 
-  // Do NOT hide the overlay here: Embedding Atlas keeps range selection visible
-  // until explicitly cleared (plain click / dbl-click).
+  // Keep overlay after lasso completion; it is cleared by plain click,
+  // double-click, or any camera movement (pan/zoom).
   mode = 'pan';
   updateModeIndicator();
   requestRender();
@@ -703,6 +931,8 @@ function handleWheel(e: WheelEvent): void {
 
   // Normalize wheel delta
   const delta = -e.deltaY / 100;
+
+  clearPersistentRangeSelection({ resetStats: true });
 
   renderer.zoom(x, y, delta, {
     shift: e.shiftKey,
@@ -723,10 +953,7 @@ function handleDoubleClick(): void {
   statSelected.textContent = '0';
 
   // Hide overlay since range selection is cleared.
-  rangeSelectionDataPolygon = null;
-  overlayCanvas.style.display = 'none';
-  const ctx = overlayCanvas.getContext('2d');
-  if (ctx) ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  clearPersistentRangeSelection({ cancelSelectionJob: false, resetStats: true });
   requestRender();
 }
 
@@ -753,7 +980,12 @@ canvas.addEventListener('wheel', handleWheel, { passive: false });
 canvas.addEventListener('dblclick', handleDoubleClick);
 window.addEventListener('resize', handleResize);
 
-for (const el of geometryInputs) el.addEventListener('change', scheduleGenerateAndLoad);
+for (const el of geometryInputs) {
+  el.addEventListener('change', () => {
+    syncRendererAvailabilityForGeometry(getSelectedGeometry());
+    scheduleGenerateAndLoad();
+  });
+}
 for (const el of rendererInputs) el.addEventListener('change', scheduleGenerateAndLoad);
 datasetModeSelect.addEventListener('change', scheduleGenerateAndLoad);
 numPointsInput.addEventListener('input', () => {
@@ -778,12 +1010,19 @@ seedInput.addEventListener('change', scheduleGenerateAndLoad);
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (renderer) {
     initRenderer(currentGeometry, currentRendererType);
-    if (dataset) renderer.setDataset(dataset);
+    if (dataset) {
+      if (is3DGeometry(currentGeometry)) {
+        (renderer as Renderer3D).setDataset(dataset as Dataset3D);
+      } else {
+        (renderer as Renderer).setDataset(dataset as Dataset);
+      }
+    }
     requestRender();
   }
 });
 
 // Initial generation
+syncRendererAvailabilityForGeometry(getSelectedGeometry());
 syncPointLabel();
 if (labelCountLabel) labelCountLabel.textContent = labelCountInput.value;
 generateAndLoad();
