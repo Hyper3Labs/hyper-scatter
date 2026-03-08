@@ -13,8 +13,7 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='none' stroke='%23888' stroke-width='3'/><circle cx='35' cy='40' r='5' fill='%23666'/><circle cx='65' cy='35' r='4' fill='%23666'/><circle cx='50' cy='60' r='6' fill='%23666'/></svg>">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
   <style>
-:root{color-scheme:light dark;--pico-font-size:14px;--pico-line-height:1.4;--viz-bg:#ffffff;--viz-disk:#f2f4f7;--viz-border:#8a9199;--viz-grid:#c9cfd880}
-@media(prefers-color-scheme:dark){:root{--viz-bg:#13171f;--viz-disk:#1b2230;--viz-border:#6b7280;--viz-grid:#2b334266}}
+:root{color-scheme:light dark;--pico-font-size:14px;--pico-line-height:1.4;--viz-bg:#13171f;--viz-disk:#1b2230;--viz-border:#94a3b8;--viz-grid:#2b334266}
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%}
 body{display:flex;flex-direction:column}
@@ -76,7 +75,7 @@ footer a{font-size:.7rem}
   aside{width:100%;border-right:none;border-bottom:1px solid var(--pico-muted-border-color);max-height:35vh}
 }
   </style>
-  <script type="module" crossorigin src="./assets/main-CKkTA75B.js"></script>
+  <script type="module" crossorigin src="./assets/main-CyVLOOeF.js"></script>
   <link rel="modulepreload" crossorigin href="./assets/modulepreload-polyfill-B5Qt9EMX.js">
 </head>
 <body>
@@ -92,10 +91,14 @@ footer a{font-size:.7rem}
       <fieldset>
         <legend>Geometry</legend>
         <div role="group">
-          <input id="geomEuclidean" type="radio" name="geometry" value="euclidean">
-          <label for="geomEuclidean">Euclidean</label>
-          <input id="geomPoincare" type="radio" name="geometry" value="poincare" checked>
+          <input id="geomEuclidean" type="radio" name="geometry" value="euclidean" checked>
+          <label for="geomEuclidean">Euc 2D</label>
+          <input id="geomPoincare" type="radio" name="geometry" value="poincare">
           <label for="geomPoincare">Poincaré</label>
+          <input id="geomEuclidean3D" type="radio" name="geometry" value="euclidean3d">
+          <label for="geomEuclidean3D">Euc 3D</label>
+          <input id="geomSphere" type="radio" name="geometry" value="sphere">
+          <label for="geomSphere">Sphere</label>
         </div>
       </fieldset>
 
