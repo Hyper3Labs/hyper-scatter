@@ -17,12 +17,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/HackerRoomAI/hyper-scatter.git"
+        "url": "git+https://github.com/Hyper3Labs/hyper-scatter.git"
   },
-  "bugs": {
-    "url": "https://github.com/HackerRoomAI/hyper-scatter/issues"
-  },
-  "homepage": "https://github.com/HackerRoomAI/hyper-scatter#readme",
+      "bugs": {
+    "url": "https://github.com/Hyper3Labs/hyper-scatter/issues"
+      },
+    "homepage": "https://github.com/Hyper3Labs/hyper-scatter#readme",
   "type": "module",
   "sideEffects": false,
   "exports": {
