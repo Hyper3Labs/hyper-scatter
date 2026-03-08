@@ -17,12 +17,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-        "url": "git+https://github.com/Hyper3Labs/hyper-scatter.git"
+    "url": "git+https://github.com/Hyper3Labs/hyper-scatter.git"
   },
-      "bugs": {
+  "bugs": {
     "url": "https://github.com/Hyper3Labs/hyper-scatter/issues"
-      },
-    "homepage": "https://github.com/Hyper3Labs/hyper-scatter#readme",
+  },
+  "homepage": "https://github.com/Hyper3Labs/hyper-scatter#readme",
   "type": "module",
   "sideEffects": false,
   "exports": {
