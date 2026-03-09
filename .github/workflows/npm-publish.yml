@@ -42,4 +42,4 @@ jobs:
 
       - name: Publish to npm
         if: ${{ github.event_name == 'release' || github.event.inputs.dry_run == 'false' }}
-        run: npm publish --provenance --access public
+        run: npm publish
