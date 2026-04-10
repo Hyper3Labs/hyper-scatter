@@ -1,6 +1,7 @@
 import {
   DEFAULT_COLORS,
   HOVER_COLOR,
+  type LassoStyle,
   SELECTION_COLOR,
   type CategoryVisibilityMask,
   type CountSelectionOptions,
@@ -237,6 +238,33 @@ function setCanvasSize(canvas: HTMLCanvasElement, width: number, height: number,
   canvas.style.height = `${height}px`;
 }
 
+function drawScreenSpaceLassoOverlay(
+  ctx: CanvasRenderingContext2D,
+  dpr: number,
+  width: number,
+  height: number,
+  polygon: Float32Array | null,
+  style: Required<LassoStyle>,
+): void {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, Math.max(1, Math.floor(width * dpr)), Math.max(1, Math.floor(height * dpr)));
+
+  if (!polygon || polygon.length < 6) return;
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.beginPath();
+  ctx.moveTo(polygon[0], polygon[1]);
+  for (let i = 2; i < polygon.length; i += 2) {
+    ctx.lineTo(polygon[i], polygon[i + 1]);
+  }
+  ctx.closePath();
+  ctx.fillStyle = style.fillColor;
+  ctx.fill();
+  ctx.strokeStyle = style.strokeColor;
+  ctx.lineWidth = Math.max(1, style.strokeWidth);
+  ctx.stroke();
+}
+
 function createSelectionResult(indices: Set<number>, computeTimeMs: number): SelectionResult3D {
   return createIndicesSelectionResult3D(indices, computeTimeMs);
 }
@@ -385,6 +413,8 @@ interface GuideProgram {
 
 abstract class PointCloud3DWebGLBase implements Renderer3D {
   protected canvas: HTMLCanvasElement | null = null;
+  protected overlayCanvas: HTMLCanvasElement | null = null;
+  protected overlayCtx: CanvasRenderingContext2D | null = null;
   protected gl: WebGL2RenderingContext | null = null;
 
   protected width = 0;
@@ -406,12 +436,25 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
   protected categoryAlpha = 1;
   protected interactionStyle: Required<InteractionStyle> = {
     selectionColor: SELECTION_COLOR,
+    selectionRadiusOffset: 2,
+    selectionRingWidth: 2,
+    highlightColor: "#94a3b8",
+    highlightRadiusOffset: 1,
+    highlightRingWidth: 1.5,
     hoverColor: HOVER_COLOR,
     hoverFillColor: null,
+    hoverRadiusOffset: 3,
   };
 
   protected selection = new Set<number>();
+  protected highlight = new Set<number>();
   protected hoveredIndex = -1;
+  protected lassoPolygon: Float32Array | null = null;
+  protected lassoStyle: Required<LassoStyle> = {
+    strokeColor: "#6366f1",
+    strokeWidth: 2,
+    fillColor: "rgba(99, 102, 241, 0.12)",
+  };
 
   protected pointsProgram: PointsProgram | null = null;
   protected solidProgram: SolidProgram | null = null;
@@ -423,10 +466,17 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
 
   protected selectionVao: WebGLVertexArrayObject | null = null;
   protected selectionPosBuffer: WebGLBuffer | null = null;
+  protected selectionLabelBuffer: WebGLBuffer | null = null;
   protected selectionVertexCount = 0;
+
+  protected highlightVao: WebGLVertexArrayObject | null = null;
+  protected highlightPosBuffer: WebGLBuffer | null = null;
+  protected highlightLabelBuffer: WebGLBuffer | null = null;
+  protected highlightVertexCount = 0;
 
   protected hoverVao: WebGLVertexArrayObject | null = null;
   protected hoverPosBuffer: WebGLBuffer | null = null;
+  protected hoverLabelBuffer: WebGLBuffer | null = null;
   protected hoverVertexCount = 0;
 
   protected guideVao: WebGLVertexArrayObject | null = null;
@@ -446,6 +496,7 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
   protected mvpMatrix: Mat4 = createMat4Identity();
   protected projectedDirty = true;
   protected selectionDirty = true;
+  protected highlightDirty = true;
   protected hoverDirty = true;
 
   protected projectedScreenX = new Float32Array(0);
@@ -458,7 +509,62 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
   protected depthBuffer = new Float32Array(0);
 
   protected selectionPositionsScratch = new Float32Array(0);
+  protected selectionLabelsScratch = new Uint16Array(0);
+  protected highlightPositionsScratch = new Float32Array(0);
+  protected highlightLabelsScratch = new Uint16Array(0);
   protected hoverPositionScratch = new Float32Array(3);
+  protected hoverLabelScratch = new Uint16Array(1);
+
+  protected ensureOverlayCanvas(): void {
+    if (!this.canvas || typeof document === "undefined") return;
+
+    if (!this.overlayCanvas || !this.overlayCtx || !this.overlayCanvas.isConnected) {
+      const parent = this.canvas.parentElement;
+      if (!parent) return;
+
+      const parentStyle = window.getComputedStyle(parent);
+      if (parentStyle.position === "static") {
+        parent.style.position = "relative";
+      }
+
+      const overlay = document.createElement("canvas");
+      overlay.setAttribute("aria-hidden", "true");
+      overlay.dataset.hyperScatterOverlay = "lasso";
+      overlay.style.position = "absolute";
+      overlay.style.inset = "0";
+      overlay.style.pointerEvents = "none";
+
+      const baseZ = Number.parseInt(window.getComputedStyle(this.canvas).zIndex ?? "0", 10);
+      overlay.style.zIndex = Number.isFinite(baseZ) ? String(baseZ + 1) : "1";
+
+      parent.appendChild(overlay);
+      this.overlayCanvas = overlay;
+      this.overlayCtx = overlay.getContext("2d");
+    }
+
+    this.syncOverlayCanvas();
+  }
+
+  protected syncOverlayCanvas(): void {
+    if (!this.overlayCanvas || !this.overlayCtx) return;
+    setCanvasSize(this.overlayCanvas, this.width, this.height, this.dpr);
+    drawScreenSpaceLassoOverlay(
+      this.overlayCtx,
+      this.dpr,
+      this.width,
+      this.height,
+      this.lassoPolygon,
+      this.lassoStyle,
+    );
+  }
+
+  protected removeOverlayCanvas(): void {
+    if (this.overlayCanvas?.parentElement) {
+      this.overlayCanvas.parentElement.removeChild(this.overlayCanvas);
+    }
+    this.overlayCanvas = null;
+    this.overlayCtx = null;
+  }
 
   protected abstract expectedGeometry(): GeometryMode3D;
 
@@ -493,7 +599,9 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     setCanvasSize(canvas, this.width, this.height, this.dpr);
     this.projectedDirty = true;
     this.selectionDirty = true;
+    this.highlightDirty = true;
     this.hoverDirty = true;
+    this.ensureOverlayCanvas();
   }
 
   setDataset(dataset: Dataset3D): void {
@@ -510,19 +618,24 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     };
 
     this.selection = new Set<number>();
+    this.highlight = new Set<number>();
     this.hoveredIndex = -1;
+    this.lassoPolygon = null;
 
     this.fitViewToDataset();
     this.ensureProjectedCapacity(this.dataset.n);
 
     this.selectionDirty = true;
+    this.highlightDirty = true;
     this.hoverDirty = true;
     this.projectedDirty = true;
+    this.syncOverlayCanvas();
 
     if (this.gl) {
       this.uploadDatasetToGPU();
       this.rebuildGuideGeometry();
       this.uploadSelectionToGPU();
+      this.uploadHighlightToGPU();
       this.uploadHoverToGPU();
     }
   }
@@ -553,16 +666,22 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     }
 
     this.selectionDirty = true;
+    this.highlightDirty = true;
     this.hoverDirty = true;
     this.projectedDirty = true;
     if (this.gl) {
       this.uploadPalette();
       this.uploadSelectionToGPU();
+      this.uploadHighlightToGPU();
       this.uploadHoverToGPU();
     }
   }
 
   setCategoryAlpha(alpha: number): void {
+    this.setInactiveOpacity(alpha);
+  }
+
+  setInactiveOpacity(alpha: number): void {
     const next = Number.isFinite(alpha) ? clamp(alpha, 0, 1) : 1;
     if (Math.abs(next - this.categoryAlpha) <= 1e-12) return;
     this.categoryAlpha = next;
@@ -575,11 +694,29 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     if (typeof style.selectionColor === "string" && style.selectionColor.length > 0) {
       this.interactionStyle.selectionColor = style.selectionColor;
     }
+    if (typeof style.selectionRadiusOffset === "number" && Number.isFinite(style.selectionRadiusOffset)) {
+      this.interactionStyle.selectionRadiusOffset = Math.max(0, style.selectionRadiusOffset);
+    }
+    if (typeof style.selectionRingWidth === "number" && Number.isFinite(style.selectionRingWidth)) {
+      this.interactionStyle.selectionRingWidth = Math.max(0.5, style.selectionRingWidth);
+    }
+    if (typeof style.highlightColor === "string" && style.highlightColor.length > 0) {
+      this.interactionStyle.highlightColor = style.highlightColor;
+    }
+    if (typeof style.highlightRadiusOffset === "number" && Number.isFinite(style.highlightRadiusOffset)) {
+      this.interactionStyle.highlightRadiusOffset = Math.max(0, style.highlightRadiusOffset);
+    }
+    if (typeof style.highlightRingWidth === "number" && Number.isFinite(style.highlightRingWidth)) {
+      this.interactionStyle.highlightRingWidth = Math.max(0.5, style.highlightRingWidth);
+    }
     if (typeof style.hoverColor === "string" && style.hoverColor.length > 0) {
       this.interactionStyle.hoverColor = style.hoverColor;
     }
     if (Object.prototype.hasOwnProperty.call(style, "hoverFillColor")) {
       this.interactionStyle.hoverFillColor = style.hoverFillColor ?? null;
+    }
+    if (typeof style.hoverRadiusOffset === "number" && Number.isFinite(style.hoverRadiusOffset)) {
+      this.interactionStyle.hoverRadiusOffset = Math.max(0, style.hoverRadiusOffset);
     }
   }
 
@@ -611,20 +748,31 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     if (this.canvas) {
       setCanvasSize(this.canvas, width, height, this.dpr);
     }
+    this.syncOverlayCanvas();
     if (this.gl && this.canvas) {
       this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
     this.projectedDirty = true;
   }
 
-  setSelection(indices: Set<number>): void {
+  setSelection(indices: Set<number> | null): void {
     // Keep selection state encapsulated: never retain caller-owned Set references.
-    this.selection = new Set(indices);
+    this.selection = new Set(indices ?? new Set<number>());
     this.selectionDirty = true;
+    this.highlightDirty = true;
   }
 
   getSelection(): Set<number> {
     return new Set(this.selection);
+  }
+
+  setHighlight(indices: Set<number> | null): void {
+    this.highlight = new Set(indices ?? new Set<number>());
+    this.highlightDirty = true;
+  }
+
+  getHighlight(): Set<number> {
+    return new Set(this.highlight);
   }
 
   setHovered(index: number): void {
@@ -634,6 +782,23 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
       this.hoveredIndex = index;
     }
     this.hoverDirty = true;
+  }
+
+  setLassoPolygon(polygon: Float32Array | null, style?: LassoStyle): void {
+    if (style) {
+      if (typeof style.strokeColor === "string" && style.strokeColor.length > 0) {
+        this.lassoStyle.strokeColor = style.strokeColor;
+      }
+      if (typeof style.fillColor === "string" && style.fillColor.length > 0) {
+        this.lassoStyle.fillColor = style.fillColor;
+      }
+      if (typeof style.strokeWidth === "number" && Number.isFinite(style.strokeWidth)) {
+        this.lassoStyle.strokeWidth = Math.max(1, style.strokeWidth);
+      }
+    }
+
+    this.lassoPolygon = polygon && polygon.length >= 6 ? new Float32Array(polygon) : null;
+    this.ensureOverlayCanvas();
   }
 
   pan(deltaX: number, deltaY: number, modifiers: Modifiers3D): void {
@@ -810,6 +975,7 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     if (!gl || !ds || !canvas || !this.pointsProgram || !this.solidProgram) return;
 
     if (this.selectionDirty) this.uploadSelectionToGPU();
+    if (this.highlightDirty) this.uploadHighlightToGPU();
     if (this.hoverDirty) this.uploadHoverToGPU();
     this.updateMvpMatrix();
 
@@ -840,13 +1006,23 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     gl.drawArrays(gl.POINTS, 0, ds.n);
     gl.bindVertexArray(null);
 
+    if (this.highlightVertexCount > 0) {
+      this.drawEmphasisPoints(
+        this.highlightVao,
+        this.highlightVertexCount,
+        this.interactionStyle.highlightColor,
+        this.interactionStyle.highlightRadiusOffset,
+        this.interactionStyle.highlightRingWidth,
+      );
+    }
+
     if (this.selectionVertexCount > 0) {
-      this.drawSolidPoints(
+      this.drawEmphasisPoints(
         this.selectionVao,
         this.selectionVertexCount,
         this.interactionStyle.selectionColor,
-        this.pointRadiusCss + 1,
-        true,
+        this.interactionStyle.selectionRadiusOffset,
+        this.interactionStyle.selectionRingWidth,
       );
     }
 
@@ -855,20 +1031,32 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
         this.hoverVao,
         this.hoverVertexCount,
         this.interactionStyle.hoverColor,
-        this.pointRadiusCss + 3,
+        this.pointRadiusCss + this.interactionStyle.hoverRadiusOffset,
         true,
       );
       if (this.selection.has(this.hoveredIndex)) {
-        this.drawSolidPoints(
+        this.drawEmphasisPoints(
           this.hoverVao,
           this.hoverVertexCount,
           this.interactionStyle.selectionColor,
-          this.pointRadiusCss + 1,
-          true,
+          this.interactionStyle.selectionRadiusOffset,
+          this.interactionStyle.selectionRingWidth,
+        );
+      } else if (this.highlight.has(this.hoveredIndex)) {
+        this.drawEmphasisPoints(
+          this.hoverVao,
+          this.hoverVertexCount,
+          this.interactionStyle.highlightColor,
+          this.interactionStyle.highlightRadiusOffset,
+          this.interactionStyle.highlightRingWidth,
         );
       } else {
         const hoverColor = this.interactionStyle.hoverFillColor ?? this.resolveLabelColor(this.hoveredIndex);
-        this.drawSolidPoints(this.hoverVao, this.hoverVertexCount, hoverColor, this.pointRadiusCss + 1, false);
+        if (this.interactionStyle.hoverFillColor) {
+          this.drawSolidPoints(this.hoverVao, this.hoverVertexCount, hoverColor, this.pointRadiusCss + 1, false);
+        } else {
+          this.drawPalettePoints(this.hoverVao, this.hoverVertexCount, this.pointRadiusCss + 1);
+        }
       }
     }
   }
@@ -882,13 +1070,18 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
 
       if (this.pointsVao) gl.deleteVertexArray(this.pointsVao);
       if (this.selectionVao) gl.deleteVertexArray(this.selectionVao);
+      if (this.highlightVao) gl.deleteVertexArray(this.highlightVao);
       if (this.hoverVao) gl.deleteVertexArray(this.hoverVao);
       if (this.guideVao) gl.deleteVertexArray(this.guideVao);
 
       if (this.pointsPosBuffer) gl.deleteBuffer(this.pointsPosBuffer);
       if (this.pointsLabelBuffer) gl.deleteBuffer(this.pointsLabelBuffer);
       if (this.selectionPosBuffer) gl.deleteBuffer(this.selectionPosBuffer);
+      if (this.selectionLabelBuffer) gl.deleteBuffer(this.selectionLabelBuffer);
+      if (this.highlightPosBuffer) gl.deleteBuffer(this.highlightPosBuffer);
+      if (this.highlightLabelBuffer) gl.deleteBuffer(this.highlightLabelBuffer);
       if (this.hoverPosBuffer) gl.deleteBuffer(this.hoverPosBuffer);
+      if (this.hoverLabelBuffer) gl.deleteBuffer(this.hoverLabelBuffer);
       if (this.guideBuffer) gl.deleteBuffer(this.guideBuffer);
 
       if (this.paletteTex) gl.deleteTexture(this.paletteTex);
@@ -901,16 +1094,22 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
 
     this.pointsVao = null;
     this.selectionVao = null;
+    this.highlightVao = null;
     this.hoverVao = null;
     this.guideVao = null;
 
     this.pointsPosBuffer = null;
     this.pointsLabelBuffer = null;
     this.selectionPosBuffer = null;
+    this.selectionLabelBuffer = null;
+    this.highlightPosBuffer = null;
+    this.highlightLabelBuffer = null;
     this.hoverPosBuffer = null;
+    this.hoverLabelBuffer = null;
     this.guideBuffer = null;
 
     this.paletteTex = null;
+    this.removeOverlayCanvas();
   }
 
   protected ensureGL(): void {
@@ -941,6 +1140,7 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
       this.uploadDatasetToGPU();
       this.rebuildGuideGeometry();
       this.uploadSelectionToGPU();
+      this.uploadHighlightToGPU();
       this.uploadHoverToGPU();
     }
 
@@ -985,9 +1185,15 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
 
     this.selectionVao = gl.createVertexArray();
     this.selectionPosBuffer = gl.createBuffer();
+    this.selectionLabelBuffer = gl.createBuffer();
+
+    this.highlightVao = gl.createVertexArray();
+    this.highlightPosBuffer = gl.createBuffer();
+    this.highlightLabelBuffer = gl.createBuffer();
 
     this.hoverVao = gl.createVertexArray();
     this.hoverPosBuffer = gl.createBuffer();
+    this.hoverLabelBuffer = gl.createBuffer();
 
     this.guideVao = gl.createVertexArray();
     this.guideBuffer = gl.createBuffer();
@@ -998,8 +1204,13 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
       !this.pointsLabelBuffer ||
       !this.selectionVao ||
       !this.selectionPosBuffer ||
+      !this.selectionLabelBuffer ||
+      !this.highlightVao ||
+      !this.highlightPosBuffer ||
+      !this.highlightLabelBuffer ||
       !this.hoverVao ||
       !this.hoverPosBuffer ||
+      !this.hoverLabelBuffer ||
       !this.guideVao ||
       !this.guideBuffer
     ) {
@@ -1020,12 +1231,27 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.selectionPosBuffer);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.selectionLabelBuffer);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_SHORT, 0, 0);
+    gl.bindVertexArray(null);
+
+    gl.bindVertexArray(this.highlightVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightPosBuffer);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightLabelBuffer);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_SHORT, 0, 0);
     gl.bindVertexArray(null);
 
     gl.bindVertexArray(this.hoverVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.hoverPosBuffer);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.hoverLabelBuffer);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_SHORT, 0, 0);
     gl.bindVertexArray(null);
 
     gl.bindVertexArray(this.guideVao);
@@ -1130,6 +1356,7 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     color: string,
     radiusCss: number,
     ring: boolean,
+    ringWidthPx = 2,
   ): void {
     const gl = this.gl;
     const program = this.solidProgram;
@@ -1141,11 +1368,54 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     if (program.uPointSizePx) gl.uniform1f(program.uPointSizePx, radiusCss * 2 * this.dpr);
     if (program.uColor) gl.uniform4f(program.uColor, r, g, b, a);
     if (program.uRingMode) gl.uniform1i(program.uRingMode, ring ? 1 : 0);
-    if (program.uRingThicknessPx) gl.uniform1f(program.uRingThicknessPx, ring ? 2 : 0);
+    if (program.uRingThicknessPx) gl.uniform1f(program.uRingThicknessPx, ring ? Math.max(0.5, ringWidthPx) : 0);
 
     gl.bindVertexArray(vao);
     gl.drawArrays(gl.POINTS, 0, count);
     gl.bindVertexArray(null);
+  }
+
+  protected drawPalettePoints(
+    vao: WebGLVertexArrayObject | null,
+    count: number,
+    radiusCss: number,
+  ): void {
+    const gl = this.gl;
+    const program = this.pointsProgram;
+    if (!gl || !program || !vao || count <= 0) return;
+
+    gl.useProgram(program.program);
+    if (program.uMvp) gl.uniformMatrix4fv(program.uMvp, false, this.mvpMatrix);
+    if (program.uPointSizePx) gl.uniform1f(program.uPointSizePx, radiusCss * 2 * this.dpr);
+    this.bindPaletteTexture();
+    if (program.uPaletteTex) gl.uniform1i(program.uPaletteTex, this.paletteTexUnit);
+    if (program.uPaletteSize) gl.uniform1i(program.uPaletteSize, this.paletteSize);
+    if (program.uPaletteWidth) gl.uniform1i(program.uPaletteWidth, this.paletteWidth);
+
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.POINTS, 0, count);
+    gl.bindVertexArray(null);
+  }
+
+  protected drawEmphasisPoints(
+    vao: WebGLVertexArrayObject | null,
+    count: number,
+    color: string,
+    radiusOffset: number,
+    ringWidth: number,
+  ): void {
+    if (!vao || count <= 0) return;
+
+    this.drawSolidPoints(
+      vao,
+      count,
+      color,
+      this.pointRadiusCss + Math.max(0, radiusOffset),
+      true,
+      ringWidth,
+    );
+
+    this.drawPalettePoints(vao, count, this.pointRadiusCss);
   }
 
   protected drawSphereGuide(): void {
@@ -1199,7 +1469,7 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
   protected uploadSelectionToGPU(): void {
     const gl = this.gl;
     const ds = this.dataset;
-    if (!gl || !ds || !this.selectionPosBuffer) return;
+    if (!gl || !ds || !this.selectionPosBuffer || !this.selectionLabelBuffer) return;
 
     if (this.selection.size === 0) {
       this.selectionVertexCount = 0;
@@ -1211,6 +1481,9 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     if (this.selectionPositionsScratch.length < renderCount * 3) {
       this.selectionPositionsScratch = new Float32Array(renderCount * 3);
     }
+    if (this.selectionLabelsScratch.length < renderCount) {
+      this.selectionLabelsScratch = new Uint16Array(renderCount);
+    }
 
     let k = 0;
     for (const i of this.selection) {
@@ -1219,6 +1492,7 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
       this.selectionPositionsScratch[k * 3] = ds.positions[i * 3];
       this.selectionPositionsScratch[k * 3 + 1] = ds.positions[i * 3 + 1];
       this.selectionPositionsScratch[k * 3 + 2] = ds.positions[i * 3 + 2];
+      this.selectionLabelsScratch[k] = ds.labels[i];
       k++;
       if (k >= renderCount) break;
     }
@@ -1227,15 +1501,60 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.selectionPosBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.selectionPositionsScratch.subarray(0, k * 3), gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.selectionLabelBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.selectionLabelsScratch.subarray(0, k), gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
     this.selectionDirty = false;
   }
 
+  protected uploadHighlightToGPU(): void {
+    const gl = this.gl;
+    const ds = this.dataset;
+    if (!gl || !ds || !this.highlightPosBuffer || !this.highlightLabelBuffer) return;
+
+    if (this.highlight.size === 0) {
+      this.highlightVertexCount = 0;
+      this.highlightDirty = false;
+      return;
+    }
+
+    const renderCount = Math.min(this.highlight.size, MAX_SELECTION_RENDER_POINTS);
+    if (this.highlightPositionsScratch.length < renderCount * 3) {
+      this.highlightPositionsScratch = new Float32Array(renderCount * 3);
+    }
+    if (this.highlightLabelsScratch.length < renderCount) {
+      this.highlightLabelsScratch = new Uint16Array(renderCount);
+    }
+
+    let k = 0;
+    for (const i of this.highlight) {
+      if (this.selection.has(i)) continue;
+      if (i < 0 || i >= ds.n) continue;
+      if (!this.isCategoryVisible(ds.labels[i])) continue;
+      this.highlightPositionsScratch[k * 3] = ds.positions[i * 3];
+      this.highlightPositionsScratch[k * 3 + 1] = ds.positions[i * 3 + 1];
+      this.highlightPositionsScratch[k * 3 + 2] = ds.positions[i * 3 + 2];
+      this.highlightLabelsScratch[k] = ds.labels[i];
+      k++;
+      if (k >= renderCount) break;
+    }
+
+    this.highlightVertexCount = k;
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightPosBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.highlightPositionsScratch.subarray(0, k * 3), gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightLabelBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.highlightLabelsScratch.subarray(0, k), gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    this.highlightDirty = false;
+  }
+
   protected uploadHoverToGPU(): void {
     const gl = this.gl;
     const ds = this.dataset;
-    if (!gl || !ds || !this.hoverPosBuffer) return;
+    if (!gl || !ds || !this.hoverPosBuffer || !this.hoverLabelBuffer) return;
 
     const i = this.hoveredIndex;
     if (i < 0 || i >= ds.n || !this.isCategoryVisible(ds.labels[i])) {
@@ -1247,9 +1566,12 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     this.hoverPositionScratch[0] = ds.positions[i * 3];
     this.hoverPositionScratch[1] = ds.positions[i * 3 + 1];
     this.hoverPositionScratch[2] = ds.positions[i * 3 + 2];
+    this.hoverLabelScratch[0] = ds.labels[i];
 
     gl.bindBuffer(gl.ARRAY_BUFFER, this.hoverPosBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.hoverPositionScratch, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.hoverLabelBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.hoverLabelScratch, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
     this.hoverVertexCount = 1;

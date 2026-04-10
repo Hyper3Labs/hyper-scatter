@@ -1,11 +1,20 @@
-import type { Dataset, GeometryMode } from './core/types.js';
-import type { Dataset3D, GeometryMode3D } from './core/types3d.js';
+import type { Dataset, GeometryMode, InitOptions, Renderer } from './core/types.js';
+import type { Dataset3D, GeometryMode3D, InitOptions3D, Renderer3D } from './core/types3d.js';
+import {
+  EuclideanWebGLCandidate,
+  HyperbolicWebGLCandidate,
+} from './impl_candidate/webgl_candidate.js';
+import {
+  Euclidean3DWebGLCandidate,
+  Spherical3DWebGLCandidate,
+} from './impl_candidate/webgl_candidate_3d.js';
 
 export type {
   Dataset,
   GeometryMode,
   Renderer,
   InitOptions,
+  LassoStyle,
   ViewState,
   EuclideanViewState,
   HyperbolicViewState,
@@ -59,6 +68,50 @@ export {
   pointInPolygon,
 } from './core/selection/point_in_polygon.js';
 
+export interface CreateScatterPlot2DOptions extends InitOptions {
+  geometry: GeometryMode;
+  dataset?: Dataset;
+}
+
+export interface CreateScatterPlot3DOptions extends InitOptions3D {
+  geometry: GeometryMode3D;
+  dataset?: Dataset3D;
+}
+
+export type ScatterPlot = Renderer | Renderer3D;
+
+export function createScatterPlot(
+  canvas: HTMLCanvasElement,
+  options: CreateScatterPlot2DOptions,
+): Renderer;
+export function createScatterPlot(
+  canvas: HTMLCanvasElement,
+  options: CreateScatterPlot3DOptions,
+): Renderer3D;
+export function createScatterPlot(
+  canvas: HTMLCanvasElement,
+  options: CreateScatterPlot2DOptions | CreateScatterPlot3DOptions,
+): ScatterPlot {
+  const { geometry, dataset, ...initOptions } = options;
+
+  let renderer: ScatterPlot;
+  if (geometry === 'sphere') {
+    renderer = new Spherical3DWebGLCandidate();
+  } else if (geometry === 'euclidean3d') {
+    renderer = new Euclidean3DWebGLCandidate();
+  } else if (geometry === 'poincare') {
+    renderer = new HyperbolicWebGLCandidate();
+  } else {
+    renderer = new EuclideanWebGLCandidate();
+  }
+
+  (renderer as Renderer | Renderer3D).init(canvas, initOptions as InitOptions & InitOptions3D);
+  if (dataset) {
+    (renderer as Renderer | Renderer3D).setDataset(dataset as Dataset & Dataset3D);
+  }
+  return renderer;
+}
+
 export function createDataset(
   geometry: GeometryMode,
   positions: Float32Array,
@@ -105,6 +158,25 @@ export function createDataset3D(
     labels: labelArray,
     geometry,
   };
+}
+
+export function createDatasetFromColumns(
+  geometry: GeometryMode,
+  x: ArrayLike<number>,
+  y: ArrayLike<number>,
+  labels?: Uint16Array,
+): Dataset {
+  return createDataset(geometry, packPositionsXY(x, y), labels);
+}
+
+export function createDataset3DFromColumns(
+  geometry: GeometryMode3D,
+  x: ArrayLike<number>,
+  y: ArrayLike<number>,
+  z: ArrayLike<number>,
+  labels?: Uint16Array,
+): Dataset3D {
+  return createDataset3D(geometry, packPositionsXYZ(x, y, z), labels);
 }
 
 export function packPositions(points: ReadonlyArray<readonly [number, number]>): Float32Array {

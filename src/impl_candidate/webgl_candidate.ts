@@ -53,6 +53,7 @@ import {
   SelectionGeometry,
   CategoryVisibilityMask,
   InteractionStyle,
+  LassoStyle,
   CountSelectionOptions,
   DEFAULT_COLORS,
   SELECTION_COLOR,
@@ -172,6 +173,33 @@ function setCanvasSize(canvas: HTMLCanvasElement, width: number, height: number,
   canvas.height = Math.max(1, Math.floor(height * dpr));
   canvas.style.width = `${width}px`;
   canvas.style.height = `${height}px`;
+}
+
+function drawScreenSpaceLassoOverlay(
+  ctx: CanvasRenderingContext2D,
+  dpr: number,
+  width: number,
+  height: number,
+  polygon: Float32Array | null,
+  style: Required<LassoStyle>,
+): void {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, Math.max(1, Math.floor(width * dpr)), Math.max(1, Math.floor(height * dpr)));
+
+  if (!polygon || polygon.length < 6) return;
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.beginPath();
+  ctx.moveTo(polygon[0], polygon[1]);
+  for (let i = 2; i < polygon.length; i += 2) {
+    ctx.lineTo(polygon[i], polygon[i + 1]);
+  }
+  ctx.closePath();
+  ctx.fillStyle = style.fillColor;
+  ctx.fill();
+  ctx.strokeStyle = style.strokeColor;
+  ctx.lineWidth = Math.max(1, style.strokeWidth);
+  ctx.stroke();
 }
 
 // Note: Palette upload is handled by WebGLRendererBase via a small palette
@@ -512,6 +540,8 @@ type GeometryKind = 'euclidean' | 'poincare';
 
 abstract class WebGLRendererBase implements Renderer {
   protected canvas: HTMLCanvasElement | null = null;
+  protected overlayCanvas: HTMLCanvasElement | null = null;
+  protected overlayCtx: CanvasRenderingContext2D | null = null;
   protected width = 0;
   protected height = 0;
   protected deviceDpr = 1;
@@ -524,7 +554,14 @@ abstract class WebGLRendererBase implements Renderer {
 
   protected dataset: Dataset | null = null;
   protected selection = new Set<number>();
+  protected highlight = new Set<number>();
   protected hoveredIndex = -1;
+  protected lassoPolygon: Float32Array | null = null;
+  protected lassoStyle: Required<LassoStyle> = {
+    strokeColor: '#6366f1',
+    strokeWidth: 2,
+    fillColor: 'rgba(99, 102, 241, 0.12)',
+  };
 
   protected pointRadiusCss = 3;
   protected colors: string[] = DEFAULT_COLORS;
@@ -534,8 +571,14 @@ abstract class WebGLRendererBase implements Renderer {
   protected categoryAlpha = 1;
   protected interactionStyle: Required<InteractionStyle> = {
     selectionColor: SELECTION_COLOR,
+    selectionRadiusOffset: 2,
+    selectionRingWidth: 2,
+    highlightColor: '#94a3b8',
+    highlightRadiusOffset: 1,
+    highlightRingWidth: 1.5,
     hoverColor: HOVER_COLOR,
     hoverFillColor: null,
+    hoverRadiusOffset: 3,
   };
 
   // Hyperbolic backdrop styling (Poincaré disk). Neutral grayscale defaults.
@@ -633,7 +676,13 @@ abstract class WebGLRendererBase implements Renderer {
   protected selectionLabelBuffer: WebGLBuffer | null = null;
   protected selectionOverlayCount = 0;
 
+  protected highlightVao: WebGLVertexArrayObject | null = null;
+  protected highlightPosBuffer: WebGLBuffer | null = null;
+  protected highlightLabelBuffer: WebGLBuffer | null = null;
+  protected highlightOverlayCount = 0;
+
   protected selectionEbo: WebGLBuffer | null = null;
+  protected highlightEbo: WebGLBuffer | null = null;
   protected hoverEbo: WebGLBuffer | null = null;
   protected interactionEbo: WebGLBuffer | null = null;
   protected interactionCount = 0;
@@ -751,7 +800,59 @@ abstract class WebGLRendererBase implements Renderer {
   protected uPointRadiusSolid: WebGLUniformLocation | null = null;
 
   protected selectionDirty = true;
+  protected highlightDirty = true;
   protected hoverDirty = true;
+
+  protected ensureOverlayCanvas(): void {
+    if (!this.canvas || typeof document === 'undefined') return;
+
+    if (!this.overlayCanvas || !this.overlayCtx || !this.overlayCanvas.isConnected) {
+      const parent = this.canvas.parentElement;
+      if (!parent) return;
+
+      const parentStyle = window.getComputedStyle(parent);
+      if (parentStyle.position === 'static') {
+        parent.style.position = 'relative';
+      }
+
+      const overlay = document.createElement('canvas');
+      overlay.setAttribute('aria-hidden', 'true');
+      overlay.dataset.hyperScatterOverlay = 'lasso';
+      overlay.style.position = 'absolute';
+      overlay.style.inset = '0';
+      overlay.style.pointerEvents = 'none';
+
+      const baseZ = Number.parseInt(window.getComputedStyle(this.canvas).zIndex ?? '0', 10);
+      overlay.style.zIndex = Number.isFinite(baseZ) ? String(baseZ + 1) : '1';
+
+      parent.appendChild(overlay);
+      this.overlayCanvas = overlay;
+      this.overlayCtx = overlay.getContext('2d');
+    }
+
+    this.syncOverlayCanvas();
+  }
+
+  protected syncOverlayCanvas(): void {
+    if (!this.overlayCanvas || !this.overlayCtx) return;
+    setCanvasSize(this.overlayCanvas, this.width, this.height, this.deviceDpr);
+    drawScreenSpaceLassoOverlay(
+      this.overlayCtx,
+      this.deviceDpr,
+      this.width,
+      this.height,
+      this.lassoPolygon,
+      this.lassoStyle,
+    );
+  }
+
+  protected removeOverlayCanvas(): void {
+    if (this.overlayCanvas?.parentElement) {
+      this.overlayCanvas.parentElement.removeChild(this.overlayCanvas);
+    }
+    this.overlayCanvas = null;
+    this.overlayCtx = null;
+  }
 
   init(canvas: HTMLCanvasElement, opts: InitOptions): void {
     this.canvas = canvas;
@@ -781,6 +882,7 @@ abstract class WebGLRendererBase implements Renderer {
     }
 
     this.paletteDirty = true;
+  this.ensureOverlayCanvas();
 
     // IMPORTANT:
     // Do NOT touch `canvas.width/height` here.
@@ -870,9 +972,13 @@ abstract class WebGLRendererBase implements Renderer {
     this.dataset = dataset;
     // Reset selection without mutating any external object passed via setSelection().
     this.selection = new Set<number>();
+    this.highlight = new Set<number>();
     this.hoveredIndex = -1;
     this.selectionDirty = true;
+    this.highlightDirty = true;
     this.hoverDirty = true;
+    this.lassoPolygon = null;
+    this.syncOverlayCanvas();
 
     // Potentially clamp points-FBO DPR for large datasets (performance priority).
     const nextDpr = this.chooseRenderDpr(dataset.n);
@@ -920,16 +1026,22 @@ abstract class WebGLRendererBase implements Renderer {
 
     this.paletteDirty = true;
     this.selectionDirty = true;
+    this.highlightDirty = true;
     this.hoverDirty = true;
 
     if (this.gl) {
       this.uploadPaletteUniforms();
       this.uploadSelectionToGPU();
+      this.uploadHighlightToGPU();
       this.uploadHoverToGPU();
     }
   }
 
   setCategoryAlpha(alpha: number): void {
+    this.setInactiveOpacity(alpha);
+  }
+
+  setInactiveOpacity(alpha: number): void {
     const next = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
     if (Math.abs(next - this.categoryAlpha) <= 1e-12) return;
     this.categoryAlpha = next;
@@ -943,11 +1055,29 @@ abstract class WebGLRendererBase implements Renderer {
     if (typeof style.selectionColor === 'string' && style.selectionColor.length > 0) {
       this.interactionStyle.selectionColor = style.selectionColor;
     }
+    if (typeof style.selectionRadiusOffset === 'number' && Number.isFinite(style.selectionRadiusOffset)) {
+      this.interactionStyle.selectionRadiusOffset = Math.max(0, style.selectionRadiusOffset);
+    }
+    if (typeof style.selectionRingWidth === 'number' && Number.isFinite(style.selectionRingWidth)) {
+      this.interactionStyle.selectionRingWidth = Math.max(0.5, style.selectionRingWidth);
+    }
+    if (typeof style.highlightColor === 'string' && style.highlightColor.length > 0) {
+      this.interactionStyle.highlightColor = style.highlightColor;
+    }
+    if (typeof style.highlightRadiusOffset === 'number' && Number.isFinite(style.highlightRadiusOffset)) {
+      this.interactionStyle.highlightRadiusOffset = Math.max(0, style.highlightRadiusOffset);
+    }
+    if (typeof style.highlightRingWidth === 'number' && Number.isFinite(style.highlightRingWidth)) {
+      this.interactionStyle.highlightRingWidth = Math.max(0.5, style.highlightRingWidth);
+    }
     if (typeof style.hoverColor === 'string' && style.hoverColor.length > 0) {
       this.interactionStyle.hoverColor = style.hoverColor;
     }
     if (Object.prototype.hasOwnProperty.call(style, 'hoverFillColor')) {
       this.interactionStyle.hoverFillColor = style.hoverFillColor ?? null;
+    }
+    if (typeof style.hoverRadiusOffset === 'number' && Number.isFinite(style.hoverRadiusOffset)) {
+      this.interactionStyle.hoverRadiusOffset = Math.max(0, style.hoverRadiusOffset);
     }
   }
 
@@ -970,6 +1100,7 @@ abstract class WebGLRendererBase implements Renderer {
   resize(width: number, height: number): void {
     this.width = width;
     this.height = height;
+    this.syncOverlayCanvas();
 
     // Only resize the drawing buffer when we own a WebGL context.
     if (this.gl && this.canvas) {
@@ -979,16 +1110,19 @@ abstract class WebGLRendererBase implements Renderer {
     }
   }
 
-  setSelection(indices: Set<number>): void {
+  setSelection(indices: Set<number> | null): void {
     // IMPORTANT: Do not eagerly clone huge selections into a JS Set.
     // For large-N lasso this can OOM. We keep the provided Set-like object.
     // For small sets, clone to keep reference semantics similar to reference impls.
-    const n = indices.size;
-    this.selection = n <= 200_000 ? new Set(indices) : indices;
+    const next = indices ?? new Set<number>();
+    const n = next.size;
+    this.selection = n <= 200_000 ? new Set(next) : next;
     this.selectionDirty = true;
+    this.highlightDirty = true;
 
     if (this.gl) {
       this.uploadSelectionToGPU();
+      this.uploadHighlightToGPU();
     }
   }
 
@@ -996,6 +1130,21 @@ abstract class WebGLRendererBase implements Renderer {
     // Returning a cloned Set is nice for encapsulation, but can OOM for huge
     // selections. For large selections, return the internal Set-like object.
     return this.selection.size <= 200_000 ? new Set(this.selection) : this.selection;
+  }
+
+  setHighlight(indices: Set<number> | null): void {
+    const next = indices ?? new Set<number>();
+    const n = next.size;
+    this.highlight = n <= 200_000 ? new Set(next) : next;
+    this.highlightDirty = true;
+
+    if (this.gl) {
+      this.uploadHighlightToGPU();
+    }
+  }
+
+  getHighlight(): Set<number> {
+    return this.highlight.size <= 200_000 ? new Set(this.highlight) : this.highlight;
   }
 
   setHovered(index: number): void {
@@ -1011,6 +1160,23 @@ abstract class WebGLRendererBase implements Renderer {
     }
   }
 
+  setLassoPolygon(polygon: Float32Array | null, style?: LassoStyle): void {
+    if (style) {
+      if (typeof style.strokeColor === 'string' && style.strokeColor.length > 0) {
+        this.lassoStyle.strokeColor = style.strokeColor;
+      }
+      if (typeof style.fillColor === 'string' && style.fillColor.length > 0) {
+        this.lassoStyle.fillColor = style.fillColor;
+      }
+      if (typeof style.strokeWidth === 'number' && Number.isFinite(style.strokeWidth)) {
+        this.lassoStyle.strokeWidth = Math.max(1, style.strokeWidth);
+      }
+    }
+
+    this.lassoPolygon = polygon && polygon.length >= 6 ? new Float32Array(polygon) : null;
+    this.ensureOverlayCanvas();
+  }
+
   destroy(): void {
     const gl = this.gl;
 
@@ -1022,13 +1188,17 @@ abstract class WebGLRendererBase implements Renderer {
       if (this.vao) gl.deleteVertexArray(this.vao);
       if (this.hoverVao) gl.deleteVertexArray(this.hoverVao);
       if (this.selectionVao) gl.deleteVertexArray(this.selectionVao);
+      if (this.highlightVao) gl.deleteVertexArray(this.highlightVao);
       if (this.posBuffer) gl.deleteBuffer(this.posBuffer);
       if (this.labelBuffer) gl.deleteBuffer(this.labelBuffer);
       if (this.hoverPosBuffer) gl.deleteBuffer(this.hoverPosBuffer);
       if (this.hoverLabelBuffer) gl.deleteBuffer(this.hoverLabelBuffer);
       if (this.selectionPosBuffer) gl.deleteBuffer(this.selectionPosBuffer);
       if (this.selectionLabelBuffer) gl.deleteBuffer(this.selectionLabelBuffer);
+      if (this.highlightPosBuffer) gl.deleteBuffer(this.highlightPosBuffer);
+      if (this.highlightLabelBuffer) gl.deleteBuffer(this.highlightLabelBuffer);
       if (this.selectionEbo) gl.deleteBuffer(this.selectionEbo);
+      if (this.highlightEbo) gl.deleteBuffer(this.highlightEbo);
       if (this.hoverEbo) gl.deleteBuffer(this.hoverEbo);
       if (this.interactionEbo) gl.deleteBuffer(this.interactionEbo);
       if (this.backdropFbo) gl.deleteFramebuffer(this.backdropFbo);
@@ -1043,6 +1213,7 @@ abstract class WebGLRendererBase implements Renderer {
     this.vao = null;
     this.hoverVao = null;
     this.selectionVao = null;
+    this.highlightVao = null;
     this.posBuffer = null;
     this.labelBuffer = null;
     this.hoverPosBuffer = null;
@@ -1050,7 +1221,11 @@ abstract class WebGLRendererBase implements Renderer {
     this.selectionPosBuffer = null;
     this.selectionLabelBuffer = null;
     this.selectionOverlayCount = 0;
+    this.highlightPosBuffer = null;
+    this.highlightLabelBuffer = null;
+    this.highlightOverlayCount = 0;
     this.selectionEbo = null;
+    this.highlightEbo = null;
     this.hoverEbo = null;
     this.interactionEbo = null;
     this.interactionCount = 0;
@@ -1081,6 +1256,7 @@ abstract class WebGLRendererBase implements Renderer {
     this.paletteTexH = 0;
     this.paletteSize = 0;
     this.paletteDirty = true;
+    this.removeOverlayCanvas();
   }
 
   protected uploadPaletteUniforms(): void {
@@ -1347,6 +1523,7 @@ abstract class WebGLRendererBase implements Renderer {
       this.uploadDatasetToGPU();
     }
     this.uploadSelectionToGPU();
+    this.uploadHighlightToGPU();
     this.uploadHoverToGPU();
 
     // Backdrop depends on size/zoom.
@@ -1580,14 +1757,20 @@ abstract class WebGLRendererBase implements Renderer {
     this.selectionPosBuffer = gl.createBuffer();
     this.selectionLabelBuffer = gl.createBuffer();
 
+    this.highlightVao = gl.createVertexArray();
+    this.highlightPosBuffer = gl.createBuffer();
+    this.highlightLabelBuffer = gl.createBuffer();
+
     this.selectionEbo = gl.createBuffer();
+    this.highlightEbo = gl.createBuffer();
     this.hoverEbo = gl.createBuffer();
     this.interactionEbo = gl.createBuffer();
 
     if (!this.vao || !this.posBuffer || !this.labelBuffer ||
         !this.hoverVao || !this.hoverPosBuffer || !this.hoverLabelBuffer ||
         !this.selectionVao || !this.selectionPosBuffer || !this.selectionLabelBuffer ||
-        !this.selectionEbo || !this.hoverEbo || !this.interactionEbo) {
+        !this.highlightVao || !this.highlightPosBuffer || !this.highlightLabelBuffer ||
+        !this.selectionEbo || !this.highlightEbo || !this.hoverEbo || !this.interactionEbo) {
       throw new Error('Failed to allocate WebGL resources');
     }
 
@@ -1623,6 +1806,17 @@ abstract class WebGLRendererBase implements Renderer {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.selectionLabelBuffer);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_SHORT, 0, 0);
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+    // Highlight VAO (N points)
+    gl.bindVertexArray(this.highlightVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightPosBuffer);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightLabelBuffer);
     gl.enableVertexAttribArray(1);
     gl.vertexAttribIPointer(1, 1, gl.UNSIGNED_SHORT, 0, 0);
     gl.bindVertexArray(null);
@@ -1779,6 +1973,75 @@ abstract class WebGLRendererBase implements Renderer {
     this.selectionDirty = false;
   }
 
+  protected uploadHighlightToGPU(): void {
+    if (!this.gl || !this.highlightEbo) return;
+    const gl = this.gl;
+
+    const MAX_RENDER_HIGHLIGHT = 250_000;
+
+    if (!this.gpuUsesFullDataset) {
+      const ds = this.dataset;
+      if (!ds || !this.highlightVao || !this.highlightPosBuffer || !this.highlightLabelBuffer) return;
+
+      const renderCount = Math.min(this.highlight.size, MAX_RENDER_HIGHLIGHT);
+      this.highlightOverlayCount = renderCount;
+      if (renderCount === 0) {
+        this.highlightDirty = false;
+        return;
+      }
+
+      const pos = new Float32Array(renderCount * 2);
+      const lab = new Uint16Array(renderCount);
+      let k = 0;
+      for (const i of this.highlight) {
+        if (this.selection.has(i)) continue;
+        if (!this.isPointVisibleByCategory(i)) continue;
+        pos[k * 2] = ds.positions[i * 2];
+        pos[k * 2 + 1] = ds.positions[i * 2 + 1];
+        lab[k] = ds.labels[i];
+        k++;
+        if (k >= renderCount) break;
+      }
+
+      this.highlightOverlayCount = k;
+
+      gl.bindVertexArray(this.highlightVao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightPosBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.highlightLabelBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, lab, gl.DYNAMIC_DRAW);
+      gl.bindVertexArray(null);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+      this.highlightDirty = false;
+      return;
+    }
+
+    const renderCount = Math.min(this.highlight.size, MAX_RENDER_HIGHLIGHT);
+    this.highlightOverlayCount = renderCount;
+    if (renderCount === 0) {
+      this.highlightDirty = false;
+      return;
+    }
+
+    const indices = new Uint32Array(renderCount);
+    let k = 0;
+    for (const i of this.highlight) {
+      if (this.selection.has(i)) continue;
+      if (!this.isPointVisibleByCategory(i)) continue;
+      indices[k++] = i;
+      if (k >= renderCount) break;
+    }
+
+    this.highlightOverlayCount = k;
+
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.highlightEbo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+
+    this.highlightDirty = false;
+  }
+
   protected uploadHoverToGPU(): void {
     if (!this.gl || !this.hoverEbo) return;
     const gl = this.gl;
@@ -1830,6 +2093,68 @@ abstract class WebGLRendererBase implements Renderer {
     this.hoverDirty = false;
   }
 
+  protected drawOverlayPointSet(
+    count: number,
+    ebo: WebGLBuffer | null,
+    vao: WebGLVertexArrayObject | null,
+  ): void {
+    const gl = this.gl;
+    if (!gl || count <= 0) return;
+
+    if (this.gpuUsesFullDataset) {
+      if (!ebo) return;
+      gl.bindVertexArray(this.vao);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+      gl.drawElements(gl.POINTS, count, gl.UNSIGNED_INT, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+      return;
+    }
+
+    if (!vao) return;
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.POINTS, 0, count);
+    gl.bindVertexArray(this.vao);
+  }
+
+  protected drawEmphasisOverlay(
+    count: number,
+    color: string,
+    radiusOffset: number,
+    ringWidth: number,
+    ebo: WebGLBuffer | null,
+    vao: WebGLVertexArrayObject | null,
+  ): void {
+    const gl = this.gl;
+    if (!gl || !this.programSolid || count <= 0) return;
+
+    const ringRadius = this.pointRadiusCss + Math.max(0, radiusOffset);
+
+    gl.useProgram(this.programSolid);
+    this.bindViewUniformsForProgram(this.programSolid);
+    if (this.uCssSizeSolid) gl.uniform2f(this.uCssSizeSolid, this.width, this.height);
+    if (this.uDprSolid) gl.uniform1f(this.uDprSolid, this.dpr);
+    if (this.uPointRadiusSolid) gl.uniform1f(this.uPointRadiusSolid, ringRadius);
+    if (this.uSolidColor) {
+      const [r, g, b, a] = parseHexColor(color);
+      gl.uniform4f(this.uSolidColor, r, g, b, a);
+    }
+    if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 1);
+    if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, Math.max(0.5, ringWidth));
+    if (this.uSolidPointSizePx) gl.uniform1f(this.uSolidPointSizePx, ringRadius * 2 * this.dpr);
+    this.drawOverlayPointSet(count, ebo, vao);
+
+    const circlePoints = this.pointsCircle;
+    if (!circlePoints) return;
+    gl.useProgram(circlePoints.program);
+    this.bindViewUniformsForProgram(circlePoints.program);
+    if (this.paletteDirty) this.uploadPaletteUniforms();
+    this.bindPaletteTexture();
+    if (circlePoints.uCssSize) gl.uniform2f(circlePoints.uCssSize, this.width, this.height);
+    if (circlePoints.uDpr) gl.uniform1f(circlePoints.uDpr, this.dpr);
+    if (circlePoints.uPointRadius) gl.uniform1f(circlePoints.uPointRadius, this.pointRadiusCss);
+    this.drawOverlayPointSet(count, ebo, vao);
+  }
+
   // Implemented per-geometry (uniform sets)
   protected abstract bindViewUniformsForProgram(program: WebGLProgram): void;
 
@@ -1877,6 +2202,7 @@ abstract class WebGLRendererBase implements Renderer {
     this.updateSquarePointPolicy(estimatedFragments);
 
     if (this.selectionDirty) this.uploadSelectionToGPU();
+    if (this.highlightDirty) this.uploadHighlightToGPU();
     if (this.hoverDirty) this.uploadHoverToGPU();
 
     // Background (full-res)
@@ -1975,53 +2301,26 @@ abstract class WebGLRendererBase implements Renderer {
       isInteracting,
     };
 
-    // Selection overlay (ring + label-colored fill, still into points buffer)
-    if (!isInteracting && this.selection.size > 0) {
-      gl.useProgram(this.programSolid);
-      this.bindViewUniformsForProgram(this.programSolid!);
+    if (!isInteracting && this.highlightOverlayCount > 0) {
+      this.drawEmphasisOverlay(
+        this.highlightOverlayCount,
+        this.interactionStyle.highlightColor,
+        this.interactionStyle.highlightRadiusOffset,
+        this.interactionStyle.highlightRingWidth,
+        this.highlightEbo,
+        this.highlightVao,
+      );
+    }
 
-      if (this.uCssSizeSolid) gl.uniform2f(this.uCssSizeSolid, this.width, this.height);
-      if (this.uDprSolid) gl.uniform1f(this.uDprSolid, this.dpr);
-      if (this.uPointRadiusSolid) gl.uniform1f(this.uPointRadiusSolid, this.pointRadiusCss + 1);
-
-      if (this.uSolidColor) {
-        const [r, g, b, a] = parseHexColor(this.interactionStyle.selectionColor);
-        gl.uniform4f(this.uSolidColor, r, g, b, a);
-      }
-      if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 1);
-      if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 2);
-      if (this.uSolidPointSizePx) gl.uniform1f(this.uSolidPointSizePx, (this.pointRadiusCss + 1) * 2 * this.dpr);
-
-      if (this.gpuUsesFullDataset) {
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.selectionEbo);
-        gl.drawElements(gl.POINTS, this.selectionOverlayCount, gl.UNSIGNED_INT, 0);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-      } else if (this.selectionVao && this.selectionOverlayCount > 0) {
-        gl.bindVertexArray(this.selectionVao);
-        gl.drawArrays(gl.POINTS, 0, this.selectionOverlayCount);
-        gl.bindVertexArray(this.vao);
-      }
-
-      const circlePoints = this.pointsCircle;
-      if (circlePoints) {
-        gl.useProgram(circlePoints.program);
-        this.bindViewUniformsForProgram(circlePoints.program);
-        if (this.paletteDirty) this.uploadPaletteUniforms();
-        this.bindPaletteTexture();
-        if (circlePoints.uCssSize) gl.uniform2f(circlePoints.uCssSize, this.width, this.height);
-        if (circlePoints.uDpr) gl.uniform1f(circlePoints.uDpr, this.dpr);
-        if (circlePoints.uPointRadius) gl.uniform1f(circlePoints.uPointRadius, this.pointRadiusCss);
-
-        if (this.gpuUsesFullDataset) {
-          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.selectionEbo);
-          gl.drawElements(gl.POINTS, this.selectionOverlayCount, gl.UNSIGNED_INT, 0);
-          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
-        } else if (this.selectionVao && this.selectionOverlayCount > 0) {
-          gl.bindVertexArray(this.selectionVao);
-          gl.drawArrays(gl.POINTS, 0, this.selectionOverlayCount);
-          gl.bindVertexArray(this.vao);
-        }
-      }
+    if (!isInteracting && this.selectionOverlayCount > 0) {
+      this.drawEmphasisOverlay(
+        this.selectionOverlayCount,
+        this.interactionStyle.selectionColor,
+        this.interactionStyle.selectionRadiusOffset,
+        this.interactionStyle.selectionRingWidth,
+        this.selectionEbo,
+        this.selectionVao,
+      );
     }
 
     // Hover overlay (still into points buffer)
@@ -2034,7 +2333,7 @@ abstract class WebGLRendererBase implements Renderer {
       if (this.uDprSolid) gl.uniform1f(this.uDprSolid, this.dpr);
 
       // Ring pass
-      const ringRadius = this.pointRadiusCss + 3;
+      const ringRadius = this.pointRadiusCss + this.interactionStyle.hoverRadiusOffset;
       if (this.uPointRadiusSolid) gl.uniform1f(this.uPointRadiusSolid, ringRadius);
       if (this.uSolidColor) {
         const [r, g, b, a] = parseHexColor(this.interactionStyle.hoverColor);
@@ -2044,52 +2343,28 @@ abstract class WebGLRendererBase implements Renderer {
       if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 2);
       if (this.uSolidPointSizePx) gl.uniform1f(this.uSolidPointSizePx, ringRadius * 2 * this.dpr);
 
-      if (this.gpuUsesFullDataset) {
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.hoverEbo);
-        gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
-      } else if (this.hoverVao) {
-        gl.bindVertexArray(this.hoverVao);
-        gl.drawArrays(gl.POINTS, 0, 1);
-        gl.bindVertexArray(this.vao);
-      }
+      this.drawOverlayPointSet(1, this.hoverEbo, this.hoverVao);
 
       // Fill pass (selection ring if selected else fill)
       const fillRadius = this.pointRadiusCss + 1;
       if (this.selection.has(this.hoveredIndex)) {
-        if (this.uPointRadiusSolid) gl.uniform1f(this.uPointRadiusSolid, fillRadius);
-        if (this.uSolidColor) {
-          const [r, g, b, a] = parseHexColor(this.interactionStyle.selectionColor);
-          gl.uniform4f(this.uSolidColor, r, g, b, a);
-        }
-        if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 1);
-        if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 2);
-        if (this.uSolidPointSizePx) gl.uniform1f(this.uSolidPointSizePx, fillRadius * 2 * this.dpr);
-        if (this.gpuUsesFullDataset) {
-          gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
-        } else if (this.hoverVao) {
-          gl.bindVertexArray(this.hoverVao);
-          gl.drawArrays(gl.POINTS, 0, 1);
-          gl.bindVertexArray(this.vao);
-        }
-
-        const circlePoints = this.pointsCircle;
-        if (circlePoints) {
-          gl.useProgram(circlePoints.program);
-          this.bindViewUniformsForProgram(circlePoints.program);
-          if (this.paletteDirty) this.uploadPaletteUniforms();
-          this.bindPaletteTexture();
-          if (circlePoints.uCssSize) gl.uniform2f(circlePoints.uCssSize, this.width, this.height);
-          if (circlePoints.uDpr) gl.uniform1f(circlePoints.uDpr, this.dpr);
-          if (circlePoints.uPointRadius) gl.uniform1f(circlePoints.uPointRadius, this.pointRadiusCss);
-
-          if (this.gpuUsesFullDataset) {
-            gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
-          } else if (this.hoverVao) {
-            gl.bindVertexArray(this.hoverVao);
-            gl.drawArrays(gl.POINTS, 0, 1);
-            gl.bindVertexArray(this.vao);
-          }
-        }
+        this.drawEmphasisOverlay(
+          1,
+          this.interactionStyle.selectionColor,
+          this.interactionStyle.selectionRadiusOffset,
+          this.interactionStyle.selectionRingWidth,
+          this.hoverEbo,
+          this.hoverVao,
+        );
+      } else if (this.highlight.has(this.hoveredIndex)) {
+        this.drawEmphasisOverlay(
+          1,
+          this.interactionStyle.highlightColor,
+          this.interactionStyle.highlightRadiusOffset,
+          this.interactionStyle.highlightRingWidth,
+          this.hoverEbo,
+          this.hoverVao,
+        );
       } else {
         const hoverFillColor = this.interactionStyle.hoverFillColor;
         if (hoverFillColor) {
@@ -2103,13 +2378,7 @@ abstract class WebGLRendererBase implements Renderer {
           if (this.uSolidRingMode) gl.uniform1i(this.uSolidRingMode, 0);
           if (this.uSolidRingThicknessPx) gl.uniform1f(this.uSolidRingThicknessPx, 0);
           if (this.uSolidPointSizePx) gl.uniform1f(this.uSolidPointSizePx, fillRadius * 2 * this.dpr);
-          if (this.gpuUsesFullDataset) {
-            gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
-          } else if (this.hoverVao) {
-            gl.bindVertexArray(this.hoverVao);
-            gl.drawArrays(gl.POINTS, 0, 1);
-            gl.bindVertexArray(this.vao);
-          }
+          this.drawOverlayPointSet(1, this.hoverEbo, this.hoverVao);
         } else {
           // Use palette program for category color when no hover fill override is set.
           const circlePoints = this.pointsCircle;
@@ -2122,13 +2391,7 @@ abstract class WebGLRendererBase implements Renderer {
           if (circlePoints.uDpr) gl.uniform1f(circlePoints.uDpr, this.dpr);
           if (circlePoints.uPointRadius) gl.uniform1f(circlePoints.uPointRadius, fillRadius);
 
-          if (this.gpuUsesFullDataset) {
-            gl.drawElements(gl.POINTS, 1, gl.UNSIGNED_INT, 0);
-          } else if (this.hoverVao) {
-            gl.bindVertexArray(this.hoverVao);
-            gl.drawArrays(gl.POINTS, 0, 1);
-            gl.bindVertexArray(this.vao);
-          }
+          this.drawOverlayPointSet(1, this.hoverEbo, this.hoverVao);
         }
       }
 

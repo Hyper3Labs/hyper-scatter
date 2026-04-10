@@ -41,6 +41,7 @@ export class EuclideanReference implements Renderer {
   private dataset: Dataset | null = null;
   private view: EuclideanViewState = createEuclideanView();
   private selection = new Set<number>();
+  private highlight = new Set<number>();
   private hoveredIndex = -1;
 
   private pointRadius = 3;
@@ -51,8 +52,14 @@ export class EuclideanReference implements Renderer {
   private categoryAlpha = 1;
   private interactionStyle: Required<InteractionStyle> = {
     selectionColor: SELECTION_COLOR,
+    selectionRadiusOffset: 0,
+    selectionRingWidth: 1,
+    highlightColor: '#94a3b8',
+    highlightRadiusOffset: 0,
+    highlightRingWidth: 1,
     hoverColor: HOVER_COLOR,
     hoverFillColor: null,
+    hoverRadiusOffset: 0,
   };
 
   private isCategoryVisible(category: number): boolean {
@@ -156,6 +163,14 @@ export class EuclideanReference implements Renderer {
     this.selection = new Set(indices);
   }
 
+  setHighlight(indices: Set<number> | null): void {
+    this.highlight = indices ? new Set(indices) : new Set<number>();
+  }
+
+  getHighlight(): Set<number> {
+    return new Set(this.highlight);
+  }
+
   setPalette(colors: string[]): void {
     this.colors = colors;
   }
@@ -183,6 +198,10 @@ export class EuclideanReference implements Renderer {
     this.categoryAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
   }
 
+  setInactiveOpacity(alpha: number): void {
+    this.setCategoryAlpha(alpha);
+  }
+
   setInteractionStyle(style: InteractionStyle): void {
     if (typeof style.selectionColor === 'string' && style.selectionColor.length > 0) {
       this.interactionStyle.selectionColor = style.selectionColor;
@@ -197,6 +216,10 @@ export class EuclideanReference implements Renderer {
 
   getSelection(): Set<number> {
     return new Set(this.selection);
+  }
+
+  setLassoPolygon(_polygon: Float32Array | null): void {
+    // Reference renderer keeps lasso overlay outside the core draw path.
   }
 
   setHovered(index: number): void {

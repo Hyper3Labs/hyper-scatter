@@ -125,10 +125,31 @@ export type CategoryVisibilityMask = ArrayLike<number | boolean>;
 export interface InteractionStyle {
   /** Color for the selected ring/halo. */
   selectionColor?: string;
+  /** Additional radius in CSS px for the selection ring. */
+  selectionRadiusOffset?: number;
+  /** Ring thickness in CSS px for the selection ring. */
+  selectionRingWidth?: number;
+  /** Color for the secondary highlight ring/halo. */
+  highlightColor?: string;
+  /** Additional radius in CSS px for the highlight ring. */
+  highlightRadiusOffset?: number;
+  /** Ring thickness in CSS px for the highlight ring. */
+  highlightRingWidth?: number;
   /** Color for the hovered ring/outline. */
   hoverColor?: string;
   /** Optional fill override for hovered, non-selected points. */
   hoverFillColor?: string | null;
+  /** Additional radius in CSS px for the hover ring. */
+  hoverRadiusOffset?: number;
+}
+
+export interface LassoStyle {
+  /** Polygon stroke color in CSS color format. */
+  strokeColor?: string;
+  /** Polygon stroke width in CSS px. */
+  strokeWidth?: number;
+  /** Polygon fill color in CSS color format. */
+  fillColor?: string;
 }
 
 export interface DisplayStateRenderer {
@@ -136,8 +157,15 @@ export interface DisplayStateRenderer {
   setPalette(colors: string[]): void;
   /** Set a per-category visibility mask (truthy = visible). */
   setCategoryVisibility(mask: CategoryVisibilityMask | null): void;
-  /** Apply a global alpha multiplier to visible categories only. */
+  /**
+   * Apply an inactive opacity multiplier to visible categories.
+   *
+   * Legacy alias for setInactiveOpacity(). Emphasized points may still be
+   * redrawn at full opacity via renderer overlays.
+   */
   setCategoryAlpha(alpha: number): void;
+  /** Apply an inactive opacity multiplier to non-emphasized visible points. */
+  setInactiveOpacity(alpha: number): void;
   /** Update hover/selection interaction colors at runtime. */
   setInteractionStyle(style: InteractionStyle): void;
 }
@@ -183,13 +211,22 @@ export interface Renderer extends DisplayStateRenderer {
   resize(width: number, height: number): void;
 
   /** Set selected point indices */
-  setSelection(indices: Set<number>): void;
+  setSelection(indices: Set<number> | null): void;
 
   /** Get current selection */
   getSelection(): Set<number>;
 
+  /** Set highlighted point indices */
+  setHighlight(indices: Set<number> | null): void;
+
+  /** Get current highlight */
+  getHighlight(): Set<number>;
+
   /** Set hovered point index (-1 for none) */
   setHovered(index: number): void;
+
+  /** Draw or clear a renderer-owned lasso polygon overlay in screen space. */
+  setLassoPolygon(polygon: Float32Array | null, style?: LassoStyle): void;
 
   /** Clean up resources */
   destroy(): void;

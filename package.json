@@ -1,6 +1,6 @@
 {
   "name": "hyper-scatter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "High-performance WebGL scatter plot renderer for Euclidean, Hyperbolic, and non-Euclidean embeddings.",
   "keywords": [
     "webgl",
@@ -50,6 +50,7 @@
     "bench:headless": "npx tsx src/benchmarks/run-browser-bench.ts --headless",
     "bench:demo": "npx tsx src/benchmarks/run-demo-interaction-bench.ts",
     "bench:accuracy": "npx tsx src/benchmarks/run-browser-accuracy.ts",
+    "bench:labels": "npx tsx src/benchmarks/run-semantic-label-bench.ts",
     "bench:node": "npx tsx src/benchmarks/node-bench.ts",
     "bench:browser": "vite --open /benchmark.html"
   },

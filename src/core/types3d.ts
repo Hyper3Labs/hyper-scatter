@@ -1,6 +1,7 @@
 import type {
   CountSelectionOptions,
   DisplayStateRenderer,
+  LassoStyle,
 } from "./types.js";
 
 export interface Dataset3D {
@@ -80,9 +81,12 @@ export interface Renderer3D extends DisplayStateRenderer {
   getView(): OrbitViewState3D;
   render(): void;
   resize(width: number, height: number): void;
-  setSelection(indices: Set<number>): void;
+  setSelection(indices: Set<number> | null): void;
   getSelection(): Set<number>;
+  setHighlight(indices: Set<number> | null): void;
+  getHighlight(): Set<number>;
   setHovered(index: number): void;
+  setLassoPolygon(polygon: Float32Array | null, style?: LassoStyle): void;
   destroy(): void;
   pan(deltaX: number, deltaY: number, modifiers: Modifiers3D): void;
   zoom(anchorX: number, anchorY: number, delta: number, modifiers: Modifiers3D): void;

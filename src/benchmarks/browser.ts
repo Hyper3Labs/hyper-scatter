@@ -325,7 +325,7 @@ async function runSingleBenchmark(
       height,
       devicePixelRatio: window.devicePixelRatio,
     });
-    renderer.setDataset(dataset);
+    (renderer as Renderer).setDataset(dataset);
   } else {
     if (rendererMode === 'reference') {
       throw new Error(`Geometry ${geometry} requires renderer='webgl' (reference mode is 2D-only).`);
@@ -345,7 +345,7 @@ async function runSingleBenchmark(
       devicePixelRatio: window.devicePixelRatio,
       pointRadius: 3,
     });
-    renderer.setDataset(dataset);
+    (renderer as Renderer3D).setDataset(dataset);
   }
 
   onProgress?.(`Warming up render...`, 0.1);
