@@ -205,6 +205,59 @@ Headed runs are the source of truth for performance numbers. Headless runs are f
 - [ ] 3D packaged interaction controller
 - [ ] 3D reference accuracy harness
 
+<details>
+<summary><strong>How we built it</strong></summary>
+
+<br>
+
+`hyper-scatter` started as the rendering core for HyperView, but it was built like a small visualization lab rather than a one-off widget.
+
+### 1. Reference first
+
+We wrote slower, readable reference renderers first and treated them as the source of truth for:
+
+- projection and unprojection
+- pan and zoom semantics
+- hit testing
+- lasso behavior
+
+That gave us a stable semantic target before optimizing anything.
+
+### 2. Harness before optimization
+
+Once the reference path existed, we built browser-side accuracy and benchmark harnesses around it.
+
+- accuracy checks compare the candidate renderer against the reference renderer
+- benchmarks measure rendering, interaction, and selection behavior
+- this keeps performance work from drifting into behavior regressions
+
+The result is that the fast path is expected to match the slow path, not invent its own semantics.
+
+### 3. Candidate renderer second
+
+The WebGL2 candidate renderer came after that. The performance work is mostly about:
+
+- pushing point rendering to the GPU
+- keeping interaction smooth at high point counts
+- preserving exact hit testing and lasso behavior where it matters
+
+That same pattern is why the package now has first-class selection, highlight, inactive-opacity, and renderer-owned lasso support instead of forcing host apps to stack custom overlay behavior on top.
+
+### 4. Productizing it
+
+The latest pass was about turning it into something other teams could actually use.
+
+- a single `createScatterPlot()` entry point
+- column-oriented dataset helpers
+- better public docs and quickstart examples
+- direct integration back into HyperView from the published npm package
+
+### 5. Semantic labels, not word clouds
+
+The package now exports semantic label helpers for cluster-style labels that can be laid out over the scatterplot. That is adjacent to word-cloud-style summarization, but it is not a full word cloud renderer or word cloud API.
+
+</details>
+
 ## License
 
 MIT © [Matin Mahmood](https://www.linkedin.com/in/matin-mahmood/) (X: [@MatinMnM](https://twitter.com/MatinMnM))

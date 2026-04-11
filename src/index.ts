@@ -68,6 +68,25 @@ export {
   pointInPolygon,
 } from './core/selection/point_in_polygon.js';
 
+export {
+  buildSemanticLabelModel,
+  layoutSemanticLabels,
+  drawSemanticLabels,
+} from './ui/semantic_labels.js';
+
+export type {
+  SemanticLabelEngine,
+  SemanticLabelDisplayMode,
+  SemanticLabelBounds,
+  SemanticLabelNode,
+  SemanticLabelModel,
+  SemanticLabelLevelConfig,
+  BuildSemanticLabelModelOptions,
+  VisibleSemanticLabel,
+  LayoutSemanticLabelsOptions,
+  DrawSemanticLabelsOptions,
+} from './ui/semantic_labels.js';
+
 export interface CreateScatterPlot2DOptions extends InitOptions {
   geometry: GeometryMode;
   dataset?: Dataset;
