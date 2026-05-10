@@ -232,13 +232,8 @@ export function comparePan(
   deltaY: number,
   epsilon = 1e-10
 ): OperationResult {
-  // For hyperbolic, we need to call startPan if it exists
-  if ('startPan' in refRenderer) {
-    (refRenderer as any).startPan(startX, startY);
-  }
-  if ('startPan' in candidateRenderer) {
-    (candidateRenderer as any).startPan(startX, startY);
-  }
+  refRenderer.startPan(startX, startY);
+  candidateRenderer.startPan(startX, startY);
 
   // Apply pan
   refRenderer.pan(deltaX, deltaY, DEFAULT_MODIFIERS);

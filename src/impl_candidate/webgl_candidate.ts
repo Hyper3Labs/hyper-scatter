@@ -1037,10 +1037,6 @@ abstract class WebGLRendererBase implements Renderer {
     }
   }
 
-  setCategoryAlpha(alpha: number): void {
-    this.setInactiveOpacity(alpha);
-  }
-
   setInactiveOpacity(alpha: number): void {
     const next = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
     if (Math.abs(next - this.categoryAlpha) <= 1e-12) return;
@@ -1462,6 +1458,7 @@ abstract class WebGLRendererBase implements Renderer {
 
   // ==== Required interaction methods (abstracts for math) ==== 
 
+  abstract startPan(screenX: number, screenY: number): void;
   abstract pan(deltaX: number, deltaY: number, modifiers: Modifiers): void;
   abstract zoom(anchorX: number, anchorY: number, delta: number, modifiers: Modifiers): void;
   abstract hitTest(screenX: number, screenY: number): HitResult | null;
@@ -2500,6 +2497,10 @@ export class EuclideanWebGLCandidate extends WebGLRendererBase {
     if (cached.uZoom) gl.uniform1f(cached.uZoom, this.view.zoom);
   }
 
+  startPan(_screenX: number, _screenY: number): void {
+    // Euclidean panning only needs deltas; the cursor anchor is implicit.
+  }
+
   pan(deltaX: number, deltaY: number, _modifiers: Modifiers): void {
     this.view = panEuclidean(this.view, deltaX, deltaY, this.width, this.height);
     this.markViewChanged();
@@ -2707,7 +2708,6 @@ export class HyperbolicWebGLCandidate extends WebGLRendererBase {
     if (cached.uDisplayZoom) gl.uniform1f(cached.uDisplayZoom, this.view.displayZoom);
   }
 
-  // For accuracy harness: called via reflection if present.
   startPan(screenX: number, screenY: number): void {
     this.lastPanScreenX = screenX;
     this.lastPanScreenY = screenY;
@@ -2716,9 +2716,7 @@ export class HyperbolicWebGLCandidate extends WebGLRendererBase {
 
   pan(deltaX: number, deltaY: number, _modifiers: Modifiers): void {
     if (!this.hasPanAnchor) {
-      this.lastPanScreenX = this.width / 2;
-      this.lastPanScreenY = this.height / 2;
-      this.hasPanAnchor = true;
+      throw new Error('startPan() must be called before pan()');
     }
 
     const startX = this.lastPanScreenX;

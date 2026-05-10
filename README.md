@@ -149,7 +149,6 @@ Important details:
 - `setSelection()` is the primary emphasis channel.
 - `setHighlight()` is a secondary emphasis channel for neighbors, search hits, or related points.
 - `setInactiveOpacity()` dims non-emphasized visible points while keeping the emphasized states readable.
-- `setCategoryAlpha()` remains available as a legacy alias for `setInactiveOpacity()`.
 
 ## Lasso and Interaction
 

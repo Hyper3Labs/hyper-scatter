@@ -795,9 +795,8 @@ function handleMouseDown(e: MouseEvent): void {
       meta: e.metaKey,
     };
 
-    // For hyperbolic, notify start of pan
-    if (renderer && 'startPan' in renderer) {
-      (renderer as any).startPan(x, y);
+    if (!is3DGeometry(currentGeometry)) {
+      (renderer as Renderer).startPan(x, y);
     }
 
     requestRender();

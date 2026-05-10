@@ -53,7 +53,7 @@ interface Renderer {
 
 Notes:
 
-- `setInactiveOpacity()` is a better long-term API than overloading `setCategoryAlpha()` with selection-specific behavior.
+- `setInactiveOpacity()` is the emphasis dimming API.
 - `setPointSizes()` should stay optional. The main fix is the emphasis model, not a broad style-channel redesign.
 
 ## Rendering Rules

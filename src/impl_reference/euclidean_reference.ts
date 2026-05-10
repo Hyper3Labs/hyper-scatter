@@ -194,12 +194,8 @@ export class EuclideanReference implements Renderer {
     }
   }
 
-  setCategoryAlpha(alpha: number): void {
-    this.categoryAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
-  }
-
   setInactiveOpacity(alpha: number): void {
-    this.setCategoryAlpha(alpha);
+    this.categoryAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
   }
 
   setInteractionStyle(style: InteractionStyle): void {
@@ -331,6 +327,10 @@ export class EuclideanReference implements Renderer {
   }
 
   // === Interaction Methods ===
+
+  startPan(_screenX: number, _screenY: number): void {
+    // Euclidean panning only needs deltas; the cursor anchor is implicit.
+  }
 
   pan(deltaX: number, deltaY: number, _modifiers: Modifiers): void {
     this.view = panEuclidean(this.view, deltaX, deltaY, this.width, this.height);

@@ -245,13 +245,14 @@ Each implementation must support:
 
 ### 4.2 Interaction Contract
 Both must support the same semantics:
+- `startPan(screenX: number, screenY: number): void`
 - `pan(deltaX: number, deltaY: number, modifiers: Modifiers): void`
 - `zoom(anchorX: number, anchorY: number, wheelDelta: number, modifiers: Modifiers): void`
 - `hitTest(screenX: number, screenY: number): HitResult | null`
 - `lassoSelect(screenPolyline: Float32Array): SelectionResult`
 
 **Interaction semantics (explicit, to match common tools):**
-- **Pan:** drag-to-pan. Pan is **anchor-invariant**: if the user drags with the pointer at screen location $s$, the data point under $s$ should remain under $s$ throughout the drag.
+- **Pan:** call `startPan()` at pointer-down, then drag-to-pan with delta updates. Pan is **anchor-invariant**: if the user drags with the pointer at screen location $s$, the data point under $s$ should remain under $s$ throughout the drag.
   - Euclidean: this corresponds to a simple translation in data-space.
   - Hyperbolic: this must be implemented via a Poincaré-disk isometry update (not Euclidean translation).
 - **Zoom:** scroll/wheel to zoom, also **anchor-invariant** around the cursor location.

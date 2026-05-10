@@ -220,10 +220,7 @@ export function createInteractionController(
       pendingPanDy = 0;
       pendingPanMods = modifiersFromEvent(e);
 
-      // For hyperbolic candidates: establish an anchor.
-      if ('startPan' in (renderer as any)) {
-        (renderer as any).startPan(x, y);
-      }
+      renderer.startPan(x, y);
 
       requestFrame();
     }

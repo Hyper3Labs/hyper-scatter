@@ -398,15 +398,11 @@ async function runSingleBenchmark(
   // and to ensure we actually reach the edges even when measuredFrames is small.
   const panFrames = Math.max(config.measuredFrames, 60);
 
-  // Start pan gesture at canvas center if supported.
+  // Start pan gesture at canvas center for 2D renderers.
   const startX = width / 2;
   const startY = height / 2;
-  if ('startPan' in (renderer as any)) {
-    try {
-      (renderer as any).startPan(startX, startY);
-    } catch {
-      // ignore
-    }
+  if (is2DGeometry(geometry)) {
+    (renderer as Renderer).startPan(startX, startY);
   }
 
   // Pan aggressively towards the edges (like a real user dragging around).

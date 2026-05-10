@@ -677,10 +677,6 @@ abstract class PointCloud3DWebGLBase implements Renderer3D {
     }
   }
 
-  setCategoryAlpha(alpha: number): void {
-    this.setInactiveOpacity(alpha);
-  }
-
   setInactiveOpacity(alpha: number): void {
     const next = Number.isFinite(alpha) ? clamp(alpha, 0, 1) : 1;
     if (Math.abs(next - this.categoryAlpha) <= 1e-12) return;

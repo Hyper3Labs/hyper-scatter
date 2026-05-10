@@ -180,12 +180,8 @@ export class HyperbolicReference implements Renderer {
     }
   }
 
-  setCategoryAlpha(alpha: number): void {
-    this.categoryAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
-  }
-
   setInactiveOpacity(alpha: number): void {
-    this.setCategoryAlpha(alpha);
+    this.categoryAlpha = Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1;
   }
 
   setInteractionStyle(style: InteractionStyle): void {
@@ -381,17 +377,16 @@ export class HyperbolicReference implements Renderer {
   private lastPanScreenY = 0;
   private hasPanAnchor = false;
 
+  /** Call this at the start of a pan gesture with the cursor position in screen pixels. */
+  startPan(screenX: number, screenY: number): void {
+    this.lastPanScreenX = screenX;
+    this.lastPanScreenY = screenY;
+    this.hasPanAnchor = true;
+  }
+
   pan(deltaX: number, deltaY: number, _modifiers: Modifiers): void {
-    // Hyperbolic pan must be anchor-invariant w.r.t. the cursor.
-    // The `Renderer.pan()` contract only gives us incremental deltas, so we
-    // track the last known cursor position (set via startPan()).
-    //
-    // If startPan() was not called, fall back to using the canvas center as the
-    // anchor to avoid undefined behavior.
     if (!this.hasPanAnchor) {
-      this.lastPanScreenX = this.width / 2;
-      this.lastPanScreenY = this.height / 2;
-      this.hasPanAnchor = true;
+      throw new Error('startPan() must be called before pan()');
     }
 
     const startX = this.lastPanScreenX;
@@ -403,13 +398,6 @@ export class HyperbolicReference implements Renderer {
 
     this.lastPanScreenX = endX;
     this.lastPanScreenY = endY;
-  }
-
-  /** Call this at the start of a pan gesture with the cursor position (in screen px). */
-  startPan(screenX: number, screenY: number): void {
-    this.lastPanScreenX = screenX;
-    this.lastPanScreenY = screenY;
-    this.hasPanAnchor = true;
   }
 
   zoom(anchorX: number, anchorY: number, delta: number, _modifiers: Modifiers): void {

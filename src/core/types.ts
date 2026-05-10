@@ -157,13 +157,6 @@ export interface DisplayStateRenderer {
   setPalette(colors: string[]): void;
   /** Set a per-category visibility mask (truthy = visible). */
   setCategoryVisibility(mask: CategoryVisibilityMask | null): void;
-  /**
-   * Apply an inactive opacity multiplier to visible categories.
-   *
-   * Legacy alias for setInactiveOpacity(). Emphasized points may still be
-   * redrawn at full opacity via renderer overlays.
-   */
-  setCategoryAlpha(alpha: number): void;
   /** Apply an inactive opacity multiplier to non-emphasized visible points. */
   setInactiveOpacity(alpha: number): void;
   /** Update hover/selection interaction colors at runtime. */
@@ -232,6 +225,9 @@ export interface Renderer extends DisplayStateRenderer {
   destroy(): void;
 
   // Interaction methods
+
+  /** Begin a pan gesture at the current cursor position in screen pixels. */
+  startPan(screenX: number, screenY: number): void;
 
   /** Pan the view (in screen pixels) */
   pan(deltaX: number, deltaY: number, modifiers: Modifiers): void;
